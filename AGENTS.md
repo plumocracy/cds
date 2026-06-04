@@ -184,16 +184,16 @@ against Bash's built-in `cd` for status, stdout, stderr, `PWD`, `OLDPWD`, and ph
 Keep these details in mind when editing it:
 
 - CI currently uses `CDS_DOCKER_IMAGE=rust:1`.
-- The Docker image must include Cargo and C++ standard library/linker support. The
-  FastEmbed/ONNX dependency links against `libstdc++`, so very small images such as
-  `rust:1-slim` can fail with `unable to find library -lstdc++`.
+- The Docker image must include Cargo. The test builds `cds` with `--no-default-features`
+  and `CDS_EMBEDDER=fake`, so it does not need the FastEmbed/ONNX dependency stack.
 - The test runner must explicitly add `/usr/local/cargo/bin` to `PATH`; some container
   invocations otherwise fail with `cargo: command not found`.
 - Bash includes source line numbers in `cd` diagnostics. Normalize only those line numbers
   before comparing stderr, while keeping the actual diagnostic text exact.
-- The Docker test can skip locally when Docker is unavailable, so use
+- The Docker test can skip locally when Docker is unavailable. Use
   `CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence -- --nocapture`
-  with Docker access when changing equivalence behavior.
+  with Docker access when changing equivalence behavior. Set `CDS_DOCKER_RANDOM_CASES`
+  to increase or decrease the randomized sample count.
 
 ## Repository Hygiene
 

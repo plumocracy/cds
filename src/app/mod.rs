@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{AppPaths, Settings, expand_tilde};
 use crate::db::{Database, DirectoryTypeCount};
-use crate::embed::{BgeSmallEmbedder, Embedder, FakeEmbedder};
+#[cfg(feature = "real-embedder")]
+use crate::embed::BgeSmallEmbedder;
+use crate::embed::{Embedder, FakeEmbedder};
 use crate::error::{Result, app_err, config_err, embed_err};
 use crate::index::{IndexProgress, IndexReport, Indexer, NoopProgress};
 use crate::search::{SearchResult, Searcher};
@@ -236,6 +238,7 @@ fn current_shell_directory() -> Option<PathBuf> {
 }
 
 enum RuntimeEmbedder {
+    #[cfg(feature = "real-embedder")]
     Bge(Box<BgeSmallEmbedder>),
     Fake(FakeEmbedder),
 }
@@ -246,16 +249,14 @@ impl RuntimeEmbedder {
             return Ok(Self::Fake(FakeEmbedder::default()));
         }
 
-        BgeSmallEmbedder::new(&paths.cache_dir)
-            .map(Box::new)
-            .map(Self::Bge)
-            .map_err(embed_err)
+        load_real_embedder(paths)
     }
 }
 
 impl Embedder for RuntimeEmbedder {
     fn dimensions(&self) -> usize {
         match self {
+            #[cfg(feature = "real-embedder")]
             Self::Bge(embedder) => embedder.dimensions(),
             Self::Fake(embedder) => embedder.dimensions(),
         }
@@ -263,6 +264,7 @@ impl Embedder for RuntimeEmbedder {
 
     fn embed(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
         match self {
+            #[cfg(feature = "real-embedder")]
             Self::Bge(embedder) => embedder.embed(text),
             Self::Fake(embedder) => embedder.embed(text),
         }
@@ -270,6 +272,7 @@ impl Embedder for RuntimeEmbedder {
 
     fn embed_document(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
         match self {
+            #[cfg(feature = "real-embedder")]
             Self::Bge(embedder) => embedder.embed_document(text),
             Self::Fake(embedder) => embedder.embed_document(text),
         }
@@ -277,10 +280,26 @@ impl Embedder for RuntimeEmbedder {
 
     fn embed_query(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
         match self {
+            #[cfg(feature = "real-embedder")]
             Self::Bge(embedder) => embedder.embed_query(text),
             Self::Fake(embedder) => embedder.embed_query(text),
         }
     }
+}
+
+#[cfg(feature = "real-embedder")]
+fn load_real_embedder(paths: &AppPaths) -> Result<RuntimeEmbedder> {
+    BgeSmallEmbedder::new(&paths.cache_dir)
+        .map(Box::new)
+        .map(RuntimeEmbedder::Bge)
+        .map_err(embed_err)
+}
+
+#[cfg(not(feature = "real-embedder"))]
+fn load_real_embedder(_paths: &AppPaths) -> Result<RuntimeEmbedder> {
+    Err(embed_err(crate::embed::EmbedError::Model {
+        message: "real embedder support is disabled; rebuild with the real-embedder feature or set CDS_EMBEDDER=fake".to_string(),
+    }))
 }
 
 #[cfg(test)]

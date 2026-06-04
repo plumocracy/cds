@@ -11,7 +11,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 127
 fi
 
-cargo build --quiet
+CDS_EMBEDDER=fake cargo build --quiet --no-default-features --bin cds
 bash tests/docker_cd_equivalence.sh
 "#;
 
@@ -48,6 +48,8 @@ fn docker_cd_equivalence_random_tree() {
         .arg("CARGO_HOME=/tmp/cargo")
         .arg("--env")
         .arg("CARGO_TARGET_DIR=/tmp/cds-target")
+        .arg("--env")
+        .arg("CDS_EMBEDDER=fake")
         .arg(image)
         .arg("bash")
         .arg("-lc")
