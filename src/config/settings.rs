@@ -108,6 +108,15 @@ impl Default for IndexSettings {
                 "*.imageset".to_string(),
                 "*.appiconset".to_string(),
                 "*.colorset".to_string(),
+                "*.svg".to_string(),
+                "*.png".to_string(),
+                "*.jpg".to_string(),
+                "*.jpeg".to_string(),
+                "*.gif".to_string(),
+                "*.webp".to_string(),
+                "*.ico".to_string(),
+                "*.pdf".to_string(),
+                "*.zip".to_string(),
             ],
             max_file_bytes: 65_536,
             max_excerpt_bytes: 4_096,
@@ -147,6 +156,46 @@ fn is_low_signal_name(name: &str) -> bool {
         || lower.ends_with(".imageset")
         || lower.ends_with(".appiconset")
         || lower.ends_with(".colorset")
+        || is_low_signal_asset_extension(&lower)
+}
+
+fn is_low_signal_asset_extension(name: &str) -> bool {
+    matches!(
+        name.rsplit_once('.').map(|(_, extension)| extension),
+        Some(
+            "svg"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "ico"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "pdf"
+                | "zip"
+                | "tar"
+                | "gz"
+                | "tgz"
+                | "bz2"
+                | "xz"
+                | "7z"
+                | "rar"
+                | "dmg"
+                | "mp3"
+                | "mp4"
+                | "mov"
+                | "avi"
+                | "webm"
+                | "wav"
+                | "flac"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "otf"
+        )
+    )
 }
 
 fn is_hidden_name(name: &str) -> bool {
@@ -286,6 +335,9 @@ mod tests {
         assert!(index.is_excluded_name("private.key"));
         assert!(index.is_excluded_name("Assets.xcassets"));
         assert!(index.is_excluded_name("Custom Icon.appiconset"));
+        assert!(index.is_excluded_name("logo.svg"));
+        assert!(index.is_excluded_name("screenshot.png"));
+        assert!(index.is_excluded_name("archive.zip"));
         assert!(index.is_excluded_directory_name(".vscode"));
         assert!(!index.is_excluded_name(".vscode"));
         assert!(!index.is_excluded_name("README.md"));

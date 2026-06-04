@@ -121,7 +121,16 @@ The initial config looks like this:
       "*.xcassets",
       "*.imageset",
       "*.appiconset",
-      "*.colorset"
+      "*.colorset",
+      "*.svg",
+      "*.png",
+      "*.jpg",
+      "*.jpeg",
+      "*.gif",
+      "*.webp",
+      "*.ico",
+      "*.pdf",
+      "*.zip"
     ],
     "max_file_bytes": 65536,
     "max_excerpt_bytes": 4096,
@@ -145,11 +154,14 @@ Or index explicit roots:
 cds --index ~/Projects ~/work
 ```
 
-The current indexer stores directory metadata and text-file content separately in SQLite.
-Directory rows store structured filesystem metadata: name, type, parent path, size in bytes,
-created time, modified time, accessed time, readonly status, and index time. Text files are
-stored as file metadata plus embedded content chunks linked back to their containing
-directories. Directory metadata itself is not embedded.
+The current indexer stores directory metadata and high-signal text-file content separately
+in SQLite. Directory rows store structured filesystem metadata: name, type, parent path,
+size in bytes, created time, modified time, accessed time, readonly status, and index time.
+High-signal files such as READMEs, package manifests, project config files, and SQL schemas
+are stored as file metadata plus embedded content chunks linked back to their containing
+directories. Low-signal arbitrary text files are skipped by default to keep initial indexing
+fast, and media/asset/archive files such as SVGs, images, PDFs, and ZIPs are ignored.
+Directory metadata itself is not embedded.
 Hidden directories are always skipped and pruned from the local index. Each configured index
 root is treated as a container, and each top-level directory inside it is indexed only through
 `max_depth_per_top_level_directory` levels.
