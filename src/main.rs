@@ -214,7 +214,10 @@ fn flush_stdout() {
     let _ = io::stdout().flush();
 }
 
-const SEARCH_LABEL: &str = "Searching";
+const SEARCH_LABEL: &str = "Searching..";
+const SEARCH_SPINNER_COLOR: &str = "\x1b[32m";
+const SEARCH_SPINNER_RESET: &str = "\x1b[0m";
+const SEARCH_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 struct SearchAnimation {
     stop: Arc<AtomicBool>,
@@ -254,7 +257,7 @@ fn spawn_search_animation(stop: Arc<AtomicBool>) -> JoinHandle<()> {
         while !stop.load(Ordering::Relaxed) {
             render_search_frame(tick);
             tick = tick.wrapping_add(1);
-            thread::sleep(Duration::from_millis(120));
+            thread::sleep(Duration::from_millis(160));
         }
 
         clear_search_frame();
@@ -272,8 +275,8 @@ fn clear_search_frame() {
 }
 
 fn search_frame(tick: usize) -> String {
-    let dots = ".".repeat((tick % 3) + 1);
-    format!("{SEARCH_LABEL}{dots}")
+    let frame = SEARCH_SPINNER_FRAMES[tick % SEARCH_SPINNER_FRAMES.len()];
+    format!("{SEARCH_SPINNER_COLOR}{frame}{SEARCH_SPINNER_RESET} {SEARCH_LABEL}")
 }
 
 #[derive(Debug, Default)]
@@ -379,10 +382,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_frame_cycles_dots() {
-        assert_eq!(search_frame(0), "Searching.");
-        assert_eq!(search_frame(1), "Searching..");
-        assert_eq!(search_frame(2), "Searching...");
-        assert_eq!(search_frame(3), "Searching.");
+    fn search_frame_cycles_dot_spinner() {
+        assert_eq!(search_frame(0), "\x1b[32m⠋\x1b[0m Searching..");
+        assert_eq!(search_frame(1), "\x1b[32m⠙\x1b[0m Searching..");
+        assert_eq!(search_frame(9), "\x1b[32m⠏\x1b[0m Searching..");
+        assert_eq!(search_frame(10), "\x1b[32m⠋\x1b[0m Searching..");
     }
 }
