@@ -65,12 +65,12 @@ async fn run(invocation: Invocation) -> error::Result<()> {
         }
         Invocation::ShellInit { shell } => write_stdout(shell_init(shell).as_bytes())?,
         Invocation::Init => {
+            let mut init_progress = TerminalInitProgress::start();
             let mut progress = TerminalIndexProgress::start();
-            let report = app::init_with_progress(&mut progress).await?;
+            let report =
+                app::init_with_progress_and_steps(&mut progress, &mut init_progress).await?;
             progress.finish();
-            println!("config ready: {}", report.config_file.display());
-            println!("database ready: {}", report.database_file.display());
-            println!("{}", report.index.human_summary());
+            init_progress.finish(&report);
         }
         Invocation::Index { roots } => {
             let mut progress = TerminalIndexProgress::start();
@@ -120,6 +120,98 @@ fn confirm_reset() -> error::Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+struct TerminalInitProgress {
+    step: usize,
+}
+
+impl TerminalInitProgress {
+    const STEP_COUNT: usize = 5;
+
+    fn start() -> Self {
+        println!("cds init");
+        flush_stdout();
+        Self { step: 0 }
+    }
+
+    fn begin(&mut self, label: &str) {
+        self.step += 1;
+        println!("[{}/{}] {label}", self.step, Self::STEP_COUNT);
+        flush_stdout();
+    }
+
+    fn detail(label: &str, value: impl std::fmt::Display) {
+        println!("      {label}: {value}");
+        flush_stdout();
+    }
+
+    fn status(label: &str, path: &Path, created: bool) {
+        let action = if created { "created" } else { "ready" };
+        Self::detail(label, format_args!("{action} {}", path.display()));
+    }
+
+    fn finish(&mut self, report: &app::InitReport) {
+        Self::detail("index", report.index.human_summary());
+        Self::detail("config", report.config_file.display());
+        Self::detail("database", report.database_file.display());
+        println!("cds init complete");
+        flush_stdout();
+    }
+}
+
+impl app::InitProgress for TerminalInitProgress {
+    fn paths_started(&mut self) {
+        self.begin("Resolve cds directories");
+    }
+
+    fn paths_ready(&mut self, config_dir: &Path, data_dir: &Path, cache_dir: &Path) {
+        Self::detail("config dir", config_dir.display());
+        Self::detail("data dir", data_dir.display());
+        Self::detail("cache dir", cache_dir.display());
+    }
+
+    fn config_started(&mut self, path: &Path) {
+        self.begin("Prepare config");
+        Self::detail("path", path.display());
+    }
+
+    fn config_ready(&mut self, path: &Path, created: bool) {
+        Self::status("config", path, created);
+    }
+
+    fn database_started(&mut self, path: &Path) {
+        self.begin("Prepare database");
+        Self::detail("path", path.display());
+    }
+
+    fn database_ready(&mut self, path: &Path, created: bool) {
+        Self::status("database", path, created);
+    }
+
+    fn model_started(&mut self, cache_dir: &Path) {
+        self.begin("Load embedding model");
+        Self::detail("model", "BAAI/bge-small-en-v1.5");
+        Self::detail("cache", cache_dir.join("models").display());
+    }
+
+    fn model_ready(&mut self, _cache_dir: &Path) {
+        Self::detail("model", "ready");
+    }
+
+    fn index_started(&mut self, roots: &[String]) {
+        self.begin("Index configured roots");
+        let roots = if roots.is_empty() {
+            "<none>".to_string()
+        } else {
+            roots.join(", ")
+        };
+        Self::detail("roots", roots);
+    }
+}
+
+fn flush_stdout() {
+    let _ = io::stdout().flush();
 }
 
 const SEARCH_LABEL: &str = "Searching";
@@ -195,18 +287,21 @@ struct TerminalIndexProgress {
     state: Arc<Mutex<ProgressState>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    enabled: bool,
 }
 
 impl TerminalIndexProgress {
     fn start() -> Self {
         let state = Arc::new(Mutex::new(ProgressState::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = Some(spawn_progress_worker(Arc::clone(&state), Arc::clone(&stop)));
+        let enabled = io::stderr().is_terminal();
+        let worker = enabled.then(|| spawn_progress_worker(Arc::clone(&state), Arc::clone(&stop)));
 
         Self {
             state,
             stop,
             worker,
+            enabled,
         }
     }
 
@@ -226,6 +321,10 @@ impl Drop for TerminalIndexProgress {
 
 impl IndexProgress for TerminalIndexProgress {
     fn directory_started(&mut self, directory: &Path) {
+        if !self.enabled {
+            return;
+        }
+
         let Ok(mut state) = self.state.lock() else {
             return;
         };
