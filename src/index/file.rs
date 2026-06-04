@@ -76,6 +76,15 @@ pub fn prepare_text_file(
         return Ok(None);
     }
 
+    let name = path
+        .file_name()
+        .unwrap_or_else(|| OsStr::new(""))
+        .to_string_lossy()
+        .into_owned();
+    if !is_high_signal_content_file(&name) {
+        return Ok(None);
+    }
+
     let bytes = fs::read(path).map_err(|source| IndexError::ReadFile {
         path: path.to_path_buf(),
         source,
@@ -94,11 +103,6 @@ pub fn prepare_text_file(
     let modified_unix_seconds = unix_seconds(metadata.modified().unwrap_or(UNIX_EPOCH));
     let file_path = path_to_string(path);
     let directory_path = path_to_string(directory);
-    let name = path
-        .file_name()
-        .unwrap_or_else(|| OsStr::new(""))
-        .to_string_lossy()
-        .into_owned();
 
     let file = IndexedFile {
         path: file_path.clone(),
@@ -180,6 +184,38 @@ fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn is_high_signal_content_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("readme") || lower == "gemfile" || lower == "dockerfile" {
+        return true;
+    }
+
+    matches!(
+        lower.as_str(),
+        "cargo.toml"
+            | "package.json"
+            | "manifest.json"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "setup.py"
+            | "go.mod"
+            | "makefile"
+            | "docker-compose.yml"
+            | "compose.yml"
+            | "compose.yaml"
+            | "tsconfig.json"
+            | "vite.config.js"
+            | "vite.config.ts"
+            | "next.config.js"
+            | "next.config.ts"
+            | "tailwind.config.js"
+            | "tailwind.config.ts"
+    ) || matches!(
+        lower.rsplit_once('.').map(|(_, extension)| extension),
+        Some("md" | "markdown" | "toml" | "yaml" | "yml" | "sql")
+    )
+}
+
 fn unix_seconds(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
@@ -209,5 +245,41 @@ mod tests {
         assert_eq!(chunks[0].text, "abc d");
         assert_eq!(chunks[1].text, "ef gh");
         assert_eq!(chunks[2].text, "i");
+    }
+
+    #[test]
+    fn skips_low_signal_text_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("notes.txt");
+        fs::write(&path, "large low-signal notes").unwrap();
+
+        let prepared = prepare_text_file(&path, temp.path(), &Settings::default()).unwrap();
+
+        assert_eq!(prepared, None);
+    }
+
+    #[test]
+    fn skips_svg_assets_even_though_they_are_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("logo.svg");
+        fs::write(&path, "<svg><title>Logo</title></svg>").unwrap();
+
+        let prepared = prepare_text_file(&path, temp.path(), &Settings::default()).unwrap();
+
+        assert_eq!(prepared, None);
+    }
+
+    #[test]
+    fn prepares_high_signal_text_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("README.md");
+        fs::write(&path, "high signal project summary").unwrap();
+
+        let prepared = prepare_text_file(&path, temp.path(), &Settings::default())
+            .unwrap()
+            .expect("README.md is indexed");
+
+        assert_eq!(prepared.file.name, "README.md");
+        assert_eq!(prepared.chunks.len(), 1);
     }
 }

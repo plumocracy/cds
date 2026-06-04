@@ -180,6 +180,129 @@ impl Database {
         Ok(())
     }
 
+    pub async fn upsert_directories_with_classifications(
+        &self,
+        directories: &[(&IndexedDocument, &[DirectoryClassification])],
+    ) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::UpsertDocument {
+                    path: "<directory batch>".to_string(),
+                    source,
+                })?;
+
+        for (document, classifications) in directories {
+            sqlx::query(
+                "
+                INSERT INTO indexed_documents (
+                    path,
+                    name,
+                    kind,
+                    parent_path,
+                    searchable_text,
+                    embedding,
+                    embedding_dim,
+                    metadata_fingerprint,
+                    size_bytes,
+                    created_unix_seconds,
+                    modified_unix_seconds,
+                    accessed_unix_seconds,
+                    readonly,
+                    indexed_unix_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    name = excluded.name,
+                    kind = excluded.kind,
+                    parent_path = excluded.parent_path,
+                    searchable_text = excluded.searchable_text,
+                    embedding = excluded.embedding,
+                    embedding_dim = excluded.embedding_dim,
+                    metadata_fingerprint = excluded.metadata_fingerprint,
+                    size_bytes = excluded.size_bytes,
+                    created_unix_seconds = excluded.created_unix_seconds,
+                    modified_unix_seconds = excluded.modified_unix_seconds,
+                    accessed_unix_seconds = excluded.accessed_unix_seconds,
+                    readonly = excluded.readonly,
+                    indexed_unix_seconds = excluded.indexed_unix_seconds
+                ",
+            )
+            .bind(&document.path)
+            .bind(&document.name)
+            .bind(document.kind.as_str())
+            .bind(&document.parent_path)
+            .bind(&document.searchable_text)
+            .bind(encode_embedding(&document.embedding))
+            .bind(
+                i64::try_from(document.embedding.len())
+                    .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
+            )
+            .bind(&document.metadata_fingerprint)
+            .bind(
+                i64::try_from(document.size_bytes)
+                    .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+            )
+            .bind(document.created_unix_seconds)
+            .bind(document.modified_unix_seconds)
+            .bind(document.accessed_unix_seconds)
+            .bind(document.readonly)
+            .bind(document.indexed_unix_seconds)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::UpsertDocument {
+                path: document.path.clone(),
+                source,
+            })?;
+
+            sqlx::query("DELETE FROM directory_classifications WHERE directory_path = ?")
+                .bind(&document.path)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|source| DbError::ReplaceDirectoryClassifications {
+                    path: document.path.clone(),
+                    source,
+                })?;
+
+            for classification in *classifications {
+                sqlx::query(
+                    "
+                    INSERT INTO directory_classifications (
+                        directory_path,
+                        label,
+                        confidence,
+                        detector,
+                        evidence_path,
+                        evidence_summary,
+                        detected_unix_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ",
+                )
+                .bind(&classification.directory_path)
+                .bind(&classification.label)
+                .bind(f64::from(classification.confidence))
+                .bind(&classification.detector)
+                .bind(&classification.evidence_path)
+                .bind(&classification.evidence_summary)
+                .bind(classification.detected_unix_seconds)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|source| DbError::InsertDirectoryClassification {
+                    path: classification.directory_path.clone(),
+                    label: classification.label.clone(),
+                    source,
+                })?;
+            }
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::CommitFileBatch { source })?;
+
+        Ok(())
+    }
+
     pub async fn replace_file_chunks(
         &self,
         file_path: &str,

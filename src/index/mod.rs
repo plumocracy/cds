@@ -241,9 +241,9 @@ mod tests {
         let root = temp.path().join("Projects");
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
-        fs::write(app.join("one.txt"), "alpha").unwrap();
-        fs::write(app.join("two.txt"), "bravo").unwrap();
-        fs::write(app.join("three.txt"), "charlie").unwrap();
+        fs::write(app.join("README.md"), "alpha").unwrap();
+        fs::write(app.join("Cargo.toml"), "bravo").unwrap();
+        fs::write(app.join("schema.sql"), "charlie").unwrap();
 
         let settings = Settings::default();
         let database = Database::open_in_memory().await.unwrap();

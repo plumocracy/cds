@@ -218,6 +218,11 @@ mod tests {
         fs::create_dir(temp.path().join(".vscode")).unwrap();
         fs::write(temp.path().join("README.md"), "Chrome extension workspace").unwrap();
         fs::write(temp.path().join(".env"), "SECRET=true").unwrap();
+        fs::write(
+            temp.path().join("logo.svg"),
+            "<svg><title>Logo</title></svg>",
+        )
+        .unwrap();
 
         let settings = Settings::default();
         let document = summarize_directory(temp.path(), &settings).unwrap();
@@ -235,6 +240,7 @@ mod tests {
         assert!(document.modified_unix_seconds > 0);
         assert!(document.searchable_text.contains("child directories: src"));
         assert!(!document.searchable_text.contains(".vscode"));
+        assert!(!document.searchable_text.contains("logo.svg"));
         assert!(document.searchable_text.contains("README.md"));
         assert!(document.searchable_text.contains("type: directory"));
         assert!(document.searchable_text.contains("size bytes:"));

@@ -1,8 +1,8 @@
+use std::collections::VecDeque;
 use std::fs;
-use std::future::Future;
-use std::path::Path;
-use std::pin::Pin;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 use super::{classify, file, summary};
 use crate::config::Settings;
@@ -38,6 +38,17 @@ impl IndexReport {
             self.roots_not_directories,
         )
     }
+
+    fn merge(&mut self, other: Self) {
+        self.roots_scanned += other.roots_scanned;
+        self.roots_missing += other.roots_missing;
+        self.roots_not_directories += other.roots_not_directories;
+        self.directories_indexed += other.directories_indexed;
+        self.files_seen += other.files_seen;
+        self.text_files_indexed += other.text_files_indexed;
+        self.file_chunks_indexed += other.file_chunks_indexed;
+        self.entries_skipped += other.entries_skipped;
+    }
 }
 
 pub async fn scan_root_with_progress<E, P>(
@@ -52,17 +63,49 @@ where
     E: Embedder,
     P: IndexProgress + ?Sized,
 {
+    let mut scan = scan_root_concurrently(root, settings)?;
+    scan.directories
+        .sort_by(|left, right| left.document.path.cmp(&right.document.path));
+    scan.files
+        .sort_by(|left, right| left.file.path.cmp(&right.file.path));
+    scan.pruned_paths.sort();
+    scan.pruned_paths.dedup();
+
+    for path in &scan.pruned_paths {
+        database
+            .delete_path_tree(path)
+            .await
+            .map_err(|source| IndexError::PruneExcludedPath {
+                path: path.clone(),
+                source: Box::new(source),
+            })?;
+    }
+
+    for directory in &scan.directories {
+        progress.directory_started(Path::new(&directory.document.path));
+    }
+
+    let directory_refs = scan
+        .directories
+        .iter()
+        .map(|directory| (&directory.document, directory.classifications.as_slice()))
+        .collect::<Vec<_>>();
+    database
+        .upsert_directories_with_classifications(&directory_refs)
+        .await
+        .map_err(|source| IndexError::StoreDocument {
+            path: root.to_string_lossy().into_owned(),
+            source: Box::new(source),
+        })?;
+
     let batch = FileIndexBatch::new(database, embedder);
-    scan_directory(
-        root,
-        settings,
-        &batch,
-        report,
-        progress,
-        DepthPosition::IndexRoot,
-    )
-    .await?;
-    batch.flush().await
+    for file in scan.files {
+        batch.push(file).await?;
+    }
+    batch.flush().await?;
+
+    report.merge(scan.report);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,115 +125,6 @@ impl DepthPosition {
     }
 }
 
-fn scan_directory<'a, E, P>(
-    directory: &'a Path,
-    settings: &'a Settings,
-    batch: &'a FileIndexBatch<'a, E>,
-    report: &'a mut IndexReport,
-    progress: &'a mut P,
-    depth_position: DepthPosition,
-) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>
-where
-    E: Embedder + 'a,
-    P: IndexProgress + ?Sized + 'a,
-{
-    Box::pin(async move {
-        progress.directory_started(directory);
-
-        let document = summary::summarize_directory(directory, settings).map_err(|source| {
-            IndexError::SummarizeDirectory {
-                path: directory.to_path_buf(),
-                source: Box::new(source),
-            }
-        })?;
-
-        batch
-            .database
-            .upsert_document(&document)
-            .await
-            .map_err(|source| IndexError::StoreDocument {
-                path: document.path.clone(),
-                source: Box::new(source),
-            })?;
-        let classifications = classify::classify_directory(directory, settings)?;
-        batch
-            .database
-            .replace_directory_classifications(&document.path, &classifications)
-            .await
-            .map_err(|source| IndexError::StoreDirectoryClassifications {
-                path: document.path.clone(),
-                source: Box::new(source),
-            })?;
-        report.directories_indexed += 1;
-
-        let entries = fs::read_dir(directory).map_err(|source| IndexError::ReadDirectory {
-            path: directory.to_path_buf(),
-            source,
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|source| IndexError::ReadDirectoryEntry {
-                path: directory.to_path_buf(),
-                source,
-            })?;
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-
-            let file_type = entry
-                .file_type()
-                .map_err(|source| IndexError::ReadFileType {
-                    path: path.clone(),
-                    source,
-                })?;
-
-            if file_type.is_dir() && settings.index.is_excluded_directory_name(&name) {
-                batch
-                    .database
-                    .delete_path_tree(&path.to_string_lossy())
-                    .await
-                    .map_err(|source| IndexError::PruneExcludedPath {
-                        path: path.to_string_lossy().into_owned(),
-                        source: Box::new(source),
-                    })?;
-                report.entries_skipped += 1;
-                continue;
-            }
-
-            if file_type.is_dir() {
-                let Some(child_position) = depth_position.child_position() else {
-                    prune_unindexed_directory(batch.database, report, &path).await?;
-                    continue;
-                };
-
-                if exceeds_max_depth(settings, child_position) {
-                    prune_unindexed_directory(batch.database, report, &path).await?;
-                    continue;
-                }
-
-                scan_directory(&path, settings, batch, report, progress, child_position).await?;
-            } else if file_type.is_file() {
-                if settings.index.is_excluded_name(&name) {
-                    report.entries_skipped += 1;
-                    continue;
-                }
-
-                report.files_seen += 1;
-                if let Some(indexed_file) = file::prepare_text_file(&path, directory, settings)? {
-                    report.text_files_indexed += 1;
-                    report.file_chunks_indexed +=
-                        u64::try_from(indexed_file.chunks.len()).unwrap_or(u64::MAX);
-                    batch.push(indexed_file).await?;
-                }
-            } else {
-                report.entries_skipped += 1;
-            }
-        }
-
-        Ok(())
-    })
-}
-
 fn exceeds_max_depth(settings: &Settings, depth_position: DepthPosition) -> bool {
     match depth_position {
         DepthPosition::IndexRoot => false,
@@ -200,20 +134,258 @@ fn exceeds_max_depth(settings: &Settings, depth_position: DepthPosition) -> bool
     }
 }
 
-async fn prune_unindexed_directory(
-    database: &Database,
-    report: &mut IndexReport,
-    path: &Path,
-) -> Result<()> {
-    database
-        .delete_path_tree(&path.to_string_lossy())
-        .await
-        .map_err(|source| IndexError::PruneExcludedPath {
-            path: path.to_string_lossy().into_owned(),
+#[derive(Debug, Clone)]
+struct ScanJob {
+    directory: PathBuf,
+    depth_position: DepthPosition,
+}
+
+#[derive(Debug, Default)]
+struct ConcurrentScan {
+    directories: Vec<ScannedDirectory>,
+    files: Vec<file::PreparedIndexedFileData>,
+    pruned_paths: Vec<String>,
+    report: IndexReport,
+}
+
+#[derive(Debug)]
+struct ScannedDirectory {
+    document: IndexedDocument,
+    classifications: Vec<crate::db::DirectoryClassification>,
+}
+
+#[derive(Debug)]
+struct ScanOutput {
+    directory: ScannedDirectory,
+    files: Vec<file::PreparedIndexedFileData>,
+    child_jobs: Vec<ScanJob>,
+    pruned_paths: Vec<String>,
+    report: IndexReport,
+}
+
+struct ScanQueue {
+    state: Mutex<ScanQueueState>,
+    changed: Condvar,
+}
+
+#[derive(Debug)]
+struct ScanQueueState {
+    pending: VecDeque<ScanJob>,
+    active: usize,
+    stopped: bool,
+}
+
+fn scan_root_concurrently(root: &Path, settings: &Settings) -> Result<ConcurrentScan> {
+    let worker_count = scan_worker_count();
+    let queue = Arc::new(ScanQueue {
+        state: Mutex::new(ScanQueueState {
+            pending: VecDeque::from([ScanJob {
+                directory: root.to_path_buf(),
+                depth_position: DepthPosition::IndexRoot,
+            }]),
+            active: 0,
+            stopped: false,
+        }),
+        changed: Condvar::new(),
+    });
+    let settings = Arc::new(settings.clone());
+    let scan = Arc::new(Mutex::new(ConcurrentScan::default()));
+    let error = Arc::new(Mutex::new(None));
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            let settings = Arc::clone(&settings);
+            let scan = Arc::clone(&scan);
+            let error = Arc::clone(&error);
+
+            scope.spawn(move || worker_loop(queue, settings, scan, error));
+        }
+    });
+
+    if let Some(error) = error.lock().expect("scan error lock is poisoned").take() {
+        return Err(error);
+    }
+
+    let scan = Arc::try_unwrap(scan)
+        .expect("scan workers have stopped")
+        .into_inner()
+        .expect("scan result lock is poisoned");
+    Ok(scan)
+}
+
+fn worker_loop(
+    queue: Arc<ScanQueue>,
+    settings: Arc<Settings>,
+    scan: Arc<Mutex<ConcurrentScan>>,
+    error: Arc<Mutex<Option<IndexError>>>,
+) {
+    loop {
+        let Some(job) = next_scan_job(&queue) else {
+            return;
+        };
+
+        let result = scan_directory_job(&job, &settings);
+        match result {
+            Ok(output) => finish_scan_job(&queue, &scan, output),
+            Err(source) => {
+                *error.lock().expect("scan error lock is poisoned") = Some(source);
+                stop_scan_workers(&queue);
+                return;
+            }
+        }
+    }
+}
+
+fn next_scan_job(queue: &ScanQueue) -> Option<ScanJob> {
+    let mut state = queue.state.lock().expect("scan queue lock is poisoned");
+
+    loop {
+        if state.stopped {
+            return None;
+        }
+
+        if let Some(job) = state.pending.pop_front() {
+            state.active += 1;
+            return Some(job);
+        }
+
+        if state.active == 0 {
+            state.stopped = true;
+            queue.changed.notify_all();
+            return None;
+        }
+
+        state = queue
+            .changed
+            .wait(state)
+            .expect("scan queue lock is poisoned");
+    }
+}
+
+fn finish_scan_job(queue: &ScanQueue, scan: &Mutex<ConcurrentScan>, output: ScanOutput) {
+    {
+        let mut scan = scan.lock().expect("scan result lock is poisoned");
+        scan.directories.push(output.directory);
+        scan.files.extend(output.files);
+        scan.pruned_paths.extend(output.pruned_paths);
+        scan.report.merge(output.report);
+    }
+
+    let mut state = queue.state.lock().expect("scan queue lock is poisoned");
+    state.pending.extend(output.child_jobs);
+    state.active = state.active.saturating_sub(1);
+    queue.changed.notify_all();
+}
+
+fn stop_scan_workers(queue: &ScanQueue) {
+    let mut state = queue.state.lock().expect("scan queue lock is poisoned");
+    state.stopped = true;
+    state.pending.clear();
+    queue.changed.notify_all();
+}
+
+fn scan_directory_job(job: &ScanJob, settings: &Settings) -> Result<ScanOutput> {
+    let document = summary::summarize_directory(&job.directory, settings).map_err(|source| {
+        IndexError::SummarizeDirectory {
+            path: job.directory.clone(),
             source: Box::new(source),
-        })?;
-    report.entries_skipped += 1;
-    Ok(())
+        }
+    })?;
+    let classifications = classify::classify_directory(&job.directory, settings)?;
+    let mut output = ScanOutput {
+        directory: ScannedDirectory {
+            document,
+            classifications,
+        },
+        files: Vec::new(),
+        child_jobs: Vec::new(),
+        pruned_paths: Vec::new(),
+        report: IndexReport {
+            directories_indexed: 1,
+            ..IndexReport::default()
+        },
+    };
+
+    let mut entries = fs::read_dir(&job.directory)
+        .map_err(|source| IndexError::ReadDirectory {
+            path: job.directory.clone(),
+            source,
+        })?
+        .map(|entry| {
+            let entry = entry.map_err(|source| IndexError::ReadDirectoryEntry {
+                path: job.directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file_type = entry
+                .file_type()
+                .map_err(|source| IndexError::ReadFileType {
+                    path: path.clone(),
+                    source,
+                })?;
+            Ok((path, name, file_type))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (path, name, file_type) in entries {
+        if file_type.is_dir() && settings.index.is_excluded_directory_name(&name) {
+            output
+                .pruned_paths
+                .push(path.to_string_lossy().into_owned());
+            output.report.entries_skipped += 1;
+            continue;
+        }
+
+        if file_type.is_dir() {
+            let Some(child_position) = job.depth_position.child_position() else {
+                output
+                    .pruned_paths
+                    .push(path.to_string_lossy().into_owned());
+                output.report.entries_skipped += 1;
+                continue;
+            };
+
+            if exceeds_max_depth(settings, child_position) {
+                output
+                    .pruned_paths
+                    .push(path.to_string_lossy().into_owned());
+                output.report.entries_skipped += 1;
+                continue;
+            }
+
+            output.child_jobs.push(ScanJob {
+                directory: path,
+                depth_position: child_position,
+            });
+        } else if file_type.is_file() {
+            if settings.index.is_excluded_name(&name) {
+                output.report.entries_skipped += 1;
+                continue;
+            }
+
+            output.report.files_seen += 1;
+            if let Some(indexed_file) = file::prepare_text_file(&path, &job.directory, settings)? {
+                output.report.text_files_indexed += 1;
+                output.report.file_chunks_indexed +=
+                    u64::try_from(indexed_file.chunks.len()).unwrap_or(u64::MAX);
+                output.files.push(indexed_file);
+            }
+        } else {
+            output.report.entries_skipped += 1;
+        }
+    }
+
+    Ok(output)
+}
+
+fn scan_worker_count() -> usize {
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .clamp(2, 8)
 }
 
 struct FileIndexBatch<'a, E> {
