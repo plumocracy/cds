@@ -2,7 +2,21 @@ name: CI
 
 on:
   push:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "tests/**/*.sh"
+      - "install.sh"
   pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "tests/**/*.sh"
+      - "install.sh"
   workflow_dispatch:
 
 permissions:
