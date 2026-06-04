@@ -122,7 +122,7 @@ fn confirm_reset() -> error::Result<bool> {
     ))
 }
 
-const SEARCH_LABEL: &str = "searching...";
+const SEARCH_LABEL: &str = "Searching";
 
 struct SearchAnimation {
     stop: Arc<AtomicBool>,
@@ -170,33 +170,18 @@ fn spawn_search_animation(stop: Arc<AtomicBool>) -> JoinHandle<()> {
 }
 
 fn render_search_frame(tick: usize) {
-    let (top, bottom) = search_frame(tick);
-    eprint!("\r\x1b[2K{top}\n\r\x1b[2K{bottom}\x1b[1A");
+    eprint!("\r\x1b[2K{}", search_frame(tick));
     let _ = io::stderr().flush();
 }
 
 fn clear_search_frame() {
-    eprint!("\r\x1b[2K\n\r\x1b[2K\x1b[1A\r");
+    eprint!("\r\x1b[2K");
     let _ = io::stderr().flush();
 }
 
-fn search_frame(tick: usize) -> (String, String) {
-    let chars = SEARCH_LABEL.chars().collect::<Vec<_>>();
-    let active = tick % chars.len();
-    let mut top = String::with_capacity(chars.len());
-    let mut bottom = String::with_capacity(chars.len());
-
-    for (index, ch) in chars.into_iter().enumerate() {
-        if index == active {
-            top.push(ch);
-            bottom.push(' ');
-        } else {
-            top.push(' ');
-            bottom.push(ch);
-        }
-    }
-
-    (top, bottom)
+fn search_frame(tick: usize) -> String {
+    let dots = ".".repeat((tick % 3) + 1);
+    format!("{SEARCH_LABEL}{dots}")
 }
 
 #[derive(Debug, Default)]
@@ -295,15 +280,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_frame_bounces_one_letter_at_a_time() {
-        let (top, bottom) = search_frame(0);
-        assert_eq!(top.chars().next(), Some('s'));
-        assert_eq!(bottom.chars().next(), Some(' '));
-        assert_eq!(bottom.chars().collect::<String>(), " earching...");
-
-        let (top, bottom) = search_frame(1);
-        assert_eq!(top.chars().nth(1), Some('e'));
-        assert_eq!(bottom.chars().nth(1), Some(' '));
-        assert_eq!(bottom.chars().collect::<String>(), "s arching...");
+    fn search_frame_cycles_dots() {
+        assert_eq!(search_frame(0), "Searching.");
+        assert_eq!(search_frame(1), "Searching..");
+        assert_eq!(search_frame(2), "Searching...");
+        assert_eq!(search_frame(3), "Searching.");
     }
 }
