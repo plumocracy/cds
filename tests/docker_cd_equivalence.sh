@@ -69,6 +69,17 @@ setup_cds() {
     eval "$(cds --shell-init bash)"
 }
 
+normalize_stderr() {
+    local file="$1"
+    local normalized
+    normalized="$(mktemp)"
+
+    sed -E \
+        's#^(tests/docker_cd_equivalence\.sh: line )[0-9]+(: cd:)#\1<line>\2#' \
+        "$file" > "$normalized"
+    mv "$normalized" "$file"
+}
+
 run_case() {
     local mode="$1"
     local start="$2"
@@ -111,6 +122,8 @@ run_case() {
             printf 'PHYSICAL_PWD=%s\n' "$physical_pwd"
         } > "$state_file"
     ) > "$out_file" 2> "$err_file"
+
+    normalize_stderr "$err_file"
 
     printf '%s\n%s\n%s\n' "$state_file" "$out_file" "$err_file"
 }

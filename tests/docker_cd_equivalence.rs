@@ -2,6 +2,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+const DOCKER_TEST_SCRIPT: &str = r#"
+set -eu
+export PATH="/usr/local/cargo/bin:${CARGO_HOME:-/usr/local/cargo}/bin:${PATH}"
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo was not found in the Docker image. Use a Rust image that includes Cargo, or set CDS_DOCKER_IMAGE." >&2
+    exit 127
+fi
+
+cargo build --quiet
+bash tests/docker_cd_equivalence.sh
+"#;
+
 #[test]
 fn docker_cd_equivalence_random_tree() {
     if !docker_is_available() {
@@ -38,7 +51,7 @@ fn docker_cd_equivalence_random_tree() {
         .arg(image)
         .arg("bash")
         .arg("-lc")
-        .arg("cargo build --quiet && bash tests/docker_cd_equivalence.sh")
+        .arg(DOCKER_TEST_SCRIPT)
         .output()
         .expect("docker cd equivalence test starts");
 
