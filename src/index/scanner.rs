@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -61,9 +62,26 @@ pub async fn scan_root_with_progress<E, P>(
 ) -> Result<()>
 where
     E: Embedder,
-    P: IndexProgress + ?Sized,
+    P: IndexProgress + Send + ?Sized,
 {
-    let mut scan = scan_root_concurrently(root, settings)?;
+    let progress = Mutex::new(progress);
+    progress
+        .lock()
+        .expect("index progress lock is poisoned")
+        .directory_started(root);
+    let (progress_tx, progress_rx) = mpsc::channel::<PathBuf>();
+    let mut scan = thread::scope(|scope| {
+        let progress = &progress;
+        scope.spawn(move || {
+            while let Ok(directory) = progress_rx.recv() {
+                progress
+                    .lock()
+                    .expect("index progress lock is poisoned")
+                    .directory_started(&directory);
+            }
+        });
+        scan_root_concurrently(root, settings, Some(progress_tx))
+    })?;
     scan.directories
         .sort_by(|left, right| left.document.path.cmp(&right.document.path));
     scan.files
@@ -71,6 +89,12 @@ where
     scan.pruned_paths.sort();
     scan.pruned_paths.dedup();
 
+    if !scan.pruned_paths.is_empty() {
+        progress
+            .lock()
+            .expect("index progress lock is poisoned")
+            .status("Pruning excluded paths");
+    }
     for path in &scan.pruned_paths {
         database
             .delete_path_tree(path)
@@ -81,10 +105,10 @@ where
             })?;
     }
 
-    for directory in &scan.directories {
-        progress.directory_started(Path::new(&directory.document.path));
-    }
-
+    progress
+        .lock()
+        .expect("index progress lock is poisoned")
+        .status("Writing directory metadata");
     let directory_refs = scan
         .directories
         .iter()
@@ -99,12 +123,153 @@ where
         })?;
 
     let batch = FileIndexBatch::new(database, embedder);
+    let has_files = !scan.files.is_empty();
+    if has_files {
+        progress
+            .lock()
+            .expect("index progress lock is poisoned")
+            .status("Embedding file chunks");
+    }
     for file in scan.files {
         batch.push(file).await?;
+    }
+    if has_files {
+        progress
+            .lock()
+            .expect("index progress lock is poisoned")
+            .status("Writing file chunks");
     }
     batch.flush().await?;
 
     report.merge(scan.report);
+    Ok(())
+}
+
+pub async fn index_file_changes<E>(
+    changed_files: Vec<PathBuf>,
+    deleted_files: Vec<String>,
+    settings: &Settings,
+    database: &Database,
+    embedder: &E,
+    report: &mut IndexReport,
+) -> Result<()>
+where
+    E: Embedder,
+{
+    let mut parent_directories = Vec::<PathBuf>::new();
+    let batch = FileIndexBatch::new(database, embedder);
+
+    for file_path in deleted_files {
+        database
+            .delete_current_file(&file_path)
+            .await
+            .map_err(|source| IndexError::PruneExcludedPath {
+                path: file_path,
+                source: Box::new(source),
+            })?;
+    }
+
+    for path in changed_files {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if settings.index.is_excluded_name(&name) {
+            database
+                .delete_current_file(&path.to_string_lossy())
+                .await
+                .map_err(|source| IndexError::PruneExcludedPath {
+                    path: path.to_string_lossy().into_owned(),
+                    source: Box::new(source),
+                })?;
+            report.entries_skipped += 1;
+            continue;
+        }
+
+        report.files_seen += 1;
+        let Some(directory) = path.parent() else {
+            report.entries_skipped += 1;
+            continue;
+        };
+
+        match file::prepare_text_file(&path, directory, settings)? {
+            Some(indexed_file) => {
+                parent_directories.push(directory.to_path_buf());
+                report.text_files_indexed += 1;
+                report.file_chunks_indexed +=
+                    u64::try_from(indexed_file.chunks.len()).unwrap_or(u64::MAX);
+                batch.push(indexed_file).await?;
+            }
+            None => {
+                database
+                    .delete_current_file(&path.to_string_lossy())
+                    .await
+                    .map_err(|source| IndexError::PruneExcludedPath {
+                        path: path.to_string_lossy().into_owned(),
+                        source: Box::new(source),
+                    })?;
+                report.entries_skipped += 1;
+            }
+        }
+    }
+
+    parent_directories.sort();
+    parent_directories.dedup();
+    ensure_parent_directories(parent_directories, settings, database, report).await?;
+    batch.flush().await?;
+    Ok(())
+}
+
+async fn ensure_parent_directories(
+    directories: Vec<PathBuf>,
+    settings: &Settings,
+    database: &Database,
+    report: &mut IndexReport,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    for directory in directories {
+        let path = directory.to_string_lossy();
+        if database
+            .get_document(&path)
+            .await
+            .map_err(|source| IndexError::StoreDocument {
+                path: path.to_string(),
+                source: Box::new(source),
+            })?
+            .is_none()
+        {
+            let document =
+                summary::summarize_directory(&directory, settings).map_err(|source| {
+                    IndexError::SummarizeDirectory {
+                        path: directory.clone(),
+                        source: Box::new(source),
+                    }
+                })?;
+            let classifications = classify::classify_directory(&directory, settings)?;
+            missing.push(ScannedDirectory {
+                document,
+                classifications,
+            });
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let directory_refs = missing
+        .iter()
+        .map(|directory| (&directory.document, directory.classifications.as_slice()))
+        .collect::<Vec<_>>();
+    database
+        .upsert_directories_with_classifications(&directory_refs)
+        .await
+        .map_err(|source| IndexError::StoreDocument {
+            path: "<file-change-parents>".to_string(),
+            source: Box::new(source),
+        })?;
+    report.directories_indexed += u64::try_from(missing.len()).unwrap_or(u64::MAX);
+
     Ok(())
 }
 
@@ -175,7 +340,11 @@ struct ScanQueueState {
     stopped: bool,
 }
 
-fn scan_root_concurrently(root: &Path, settings: &Settings) -> Result<ConcurrentScan> {
+fn scan_root_concurrently(
+    root: &Path,
+    settings: &Settings,
+    progress_tx: Option<mpsc::Sender<PathBuf>>,
+) -> Result<ConcurrentScan> {
     let worker_count = scan_worker_count();
     let queue = Arc::new(ScanQueue {
         state: Mutex::new(ScanQueueState {
@@ -198,8 +367,9 @@ fn scan_root_concurrently(root: &Path, settings: &Settings) -> Result<Concurrent
             let settings = Arc::clone(&settings);
             let scan = Arc::clone(&scan);
             let error = Arc::clone(&error);
+            let progress_tx = progress_tx.clone();
 
-            scope.spawn(move || worker_loop(queue, settings, scan, error));
+            scope.spawn(move || worker_loop(queue, settings, scan, error, progress_tx));
         }
     });
 
@@ -219,11 +389,16 @@ fn worker_loop(
     settings: Arc<Settings>,
     scan: Arc<Mutex<ConcurrentScan>>,
     error: Arc<Mutex<Option<IndexError>>>,
+    progress_tx: Option<mpsc::Sender<PathBuf>>,
 ) {
     loop {
         let Some(job) = next_scan_job(&queue) else {
             return;
         };
+
+        if let Some(progress_tx) = &progress_tx {
+            let _ = progress_tx.send(job.directory.clone());
+        }
 
         let result = scan_directory_job(&job, &settings);
         match result {

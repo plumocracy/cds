@@ -8,11 +8,11 @@ use std::path::Path;
 
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 
 pub use document::{
     DirectoryClassification, DirectoryTypeCount, DocumentKind, FileChunkMatch, IndexedDocument,
-    IndexedFile, IndexedFileChunk,
+    IndexedFile, IndexedFileChunk, ModifiedTimeRange,
 };
 pub use error::DbError;
 pub use vector::{decode_embedding, encode_embedding};
@@ -62,7 +62,29 @@ impl Database {
         Ok(Self { pool })
     }
 
+    pub async fn current_revision(&self) -> Result<i64> {
+        sqlx::query_scalar(
+            "
+            SELECT value
+            FROM index_metadata
+            WHERE key = 'revision'
+            ",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadIndexRevision { source })
+    }
+
     pub async fn upsert_document(&self, document: &IndexedDocument) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::UpsertDocument {
+                    path: document.path.clone(),
+                    source,
+                })?;
+
         sqlx::query(
             "
             INSERT INTO indexed_documents (
@@ -117,17 +139,35 @@ impl Database {
         .bind(document.accessed_unix_seconds)
         .bind(document.readonly)
         .bind(document.indexed_unix_seconds)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::UpsertDocument {
             path: document.path.clone(),
             source,
         })?;
 
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::UpsertDocument {
+                path: document.path.clone(),
+                source,
+            })?;
+
         Ok(())
     }
 
     pub async fn upsert_file(&self, file: &IndexedFile) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|source| DbError::UpsertFile {
+                path: file.path.clone(),
+                source,
+            })?;
+
         sqlx::query(
             "
             INSERT INTO indexed_files (
@@ -170,12 +210,21 @@ impl Database {
         .bind(file.readonly)
         .bind(&file.content_fingerprint)
         .bind(file.indexed_unix_seconds)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::UpsertFile {
             path: file.path.clone(),
             source,
         })?;
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::UpsertFile {
+                path: file.path.clone(),
+                source,
+            })?;
 
         Ok(())
     }
@@ -295,6 +344,7 @@ impl Database {
             }
         }
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -308,9 +358,18 @@ impl Database {
         file_path: &str,
         chunks: &[IndexedFileChunk],
     ) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::DeleteFileChunks {
+                    path: file_path.to_string(),
+                    source,
+                })?;
+
         sqlx::query("DELETE FROM indexed_file_chunks WHERE file_path = ?")
             .bind(file_path)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::DeleteFileChunks {
                 path: file_path.to_string(),
@@ -351,7 +410,7 @@ impl Database {
                     .map_err(|source| DbError::MetadataSizeOverflow { source })?,
             )
             .bind(chunk.indexed_unix_seconds)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::InsertFileChunk {
                 path: chunk.file_path.clone(),
@@ -359,6 +418,52 @@ impl Database {
                 source,
             })?;
         }
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::CommitFileBatch { source })?;
+
+        Ok(())
+    }
+
+    pub async fn delete_current_file(&self, file_path: &str) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|source| DbError::DeleteFile {
+                path: file_path.to_string(),
+                source,
+            })?;
+
+        sqlx::query("DELETE FROM indexed_file_chunks WHERE file_path = ?")
+            .bind(file_path)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::DeleteFileChunks {
+                path: file_path.to_string(),
+                source,
+            })?;
+
+        sqlx::query("DELETE FROM indexed_files WHERE path = ?")
+            .bind(file_path)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::DeleteFile {
+                path: file_path.to_string(),
+                source,
+            })?;
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::DeleteFile {
+                path: file_path.to_string(),
+                source,
+            })?;
 
         Ok(())
     }
@@ -476,9 +581,12 @@ impl Database {
                     chunk_index: chunk.chunk_index,
                     source,
                 })?;
+
+                insert_file_chunk_history(&mut transaction, file, chunk).await?;
             }
         }
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -492,9 +600,18 @@ impl Database {
         directory_path: &str,
         classifications: &[DirectoryClassification],
     ) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::ReplaceDirectoryClassifications {
+                    path: directory_path.to_string(),
+                    source,
+                })?;
+
         sqlx::query("DELETE FROM directory_classifications WHERE directory_path = ?")
             .bind(directory_path)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::ReplaceDirectoryClassifications {
                 path: directory_path.to_string(),
@@ -522,7 +639,7 @@ impl Database {
             .bind(&classification.evidence_path)
             .bind(&classification.evidence_summary)
             .bind(classification.detected_unix_seconds)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::InsertDirectoryClassification {
                 path: classification.directory_path.clone(),
@@ -531,12 +648,29 @@ impl Database {
             })?;
         }
 
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::ReplaceDirectoryClassifications {
+                path: directory_path.to_string(),
+                source,
+            })?;
+
         Ok(())
     }
 
     pub async fn delete_path_tree(&self, path: &str) -> Result<()> {
         let path_len = i64::try_from(path.len())
             .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?;
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::DeletePathTree {
+                    path: path.to_string(),
+                    source,
+                })?;
 
         sqlx::query(
             "
@@ -554,7 +688,41 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|source| DbError::DeletePathTree {
+            path: path.to_string(),
+            source,
+        })?;
+
+        sqlx::query(
+            "
+            DELETE FROM indexed_file_chunk_history
+            WHERE file_path = ?
+                OR directory_path = ?
+                OR (
+                    length(file_path) > ?
+                    AND substr(file_path, 1, ?) = ?
+                    AND substr(file_path, ? + 1, 1) = '/'
+                )
+                OR (
+                    length(directory_path) > ?
+                    AND substr(directory_path, 1, ?) = ?
+                    AND substr(directory_path, ? + 1, 1) = '/'
+                )
+            ",
+        )
+        .bind(path)
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -588,7 +756,7 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -622,7 +790,7 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -645,12 +813,21 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
             source,
         })?;
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::DeletePathTree {
+                path: path.to_string(),
+                source,
+            })?;
 
         Ok(())
     }
@@ -674,6 +851,10 @@ impl Database {
             .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
+        sqlx::query("DELETE FROM indexed_file_chunk_history")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
         sqlx::query("DELETE FROM indexed_files")
             .execute(&mut *transaction)
             .await
@@ -683,6 +864,7 @@ impl Database {
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -776,15 +958,153 @@ impl Database {
             .map_err(|source| DbError::ReadDirectoryDocuments { source })
     }
 
-    pub async fn file_chunk_matches(&self) -> Result<Vec<FileChunkMatch>> {
+    pub async fn directory_search_documents(&self) -> Result<Vec<IndexedDocument>> {
         let rows = sqlx::query(
             "
+            SELECT
+                path,
+                name,
+                kind,
+                parent_path,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                indexed_unix_seconds
+            FROM indexed_documents
+            WHERE kind = 'directory'
+            ",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadDirectoryDocuments { source })?;
+
+        rows.into_iter()
+            .map(decode_directory_search_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| DbError::ReadDirectoryDocuments { source })
+    }
+
+    pub async fn directory_candidates_by_terms(
+        &self,
+        terms: &[String],
+    ) -> Result<Vec<IndexedDocument>> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "
+            SELECT
+                path,
+                name,
+                kind,
+                parent_path,
+                searchable_text,
+                embedding,
+                metadata_fingerprint,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                indexed_unix_seconds
+            FROM indexed_documents
+            WHERE kind = 'directory' AND (
+            ",
+        );
+        push_directory_term_filter(&mut query, terms);
+        query.push(") ORDER BY path");
+
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|source| DbError::ReadDirectoryDocuments { source })?;
+
+        rows.into_iter()
+            .map(decode_document_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| DbError::ReadDirectoryDocuments { source })
+    }
+
+    pub async fn directory_search_candidates_by_terms(
+        &self,
+        terms: &[String],
+    ) -> Result<Vec<IndexedDocument>> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "
+            SELECT
+                path,
+                name,
+                kind,
+                parent_path,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                indexed_unix_seconds
+            FROM indexed_documents
+            WHERE kind = 'directory' AND (
+            ",
+        );
+        push_directory_term_filter(&mut query, terms);
+        query.push(") ORDER BY path");
+
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|source| DbError::ReadDirectoryDocuments { source })?;
+
+        rows.into_iter()
+            .map(decode_directory_search_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| DbError::ReadDirectoryDocuments { source })
+    }
+
+    pub async fn file_chunk_matches(&self) -> Result<Vec<FileChunkMatch>> {
+        self.file_chunk_matches_with_modified_range(None).await
+    }
+
+    pub async fn file_chunk_matches_with_modified_range(
+        &self,
+        modified_range: Option<ModifiedTimeRange>,
+    ) -> Result<Vec<FileChunkMatch>> {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "
+            SELECT
+                file_path,
+                file_name,
+                directory_path,
+                content,
+                embedding,
+                0 AS is_current,
+                file_modified_unix_seconds,
+                directory_modified_unix_seconds
+            FROM indexed_file_chunk_history
+            ",
+        );
+        if let Some(range) = modified_range {
+            query.push(" WHERE ");
+            push_modified_time_filter(&mut query, "file_modified_unix_seconds", range);
+        }
+        query.push(
+            "
+            UNION ALL
             SELECT
                 chunk.file_path,
                 file.name AS file_name,
                 chunk.directory_path,
                 chunk.content,
                 chunk.embedding,
+                1 AS is_current,
                 file.modified_unix_seconds AS file_modified_unix_seconds,
                 directory.modified_unix_seconds AS directory_modified_unix_seconds
             FROM indexed_file_chunks AS chunk
@@ -794,10 +1114,92 @@ impl Database {
                 ON directory.path = chunk.directory_path
             WHERE directory.kind = 'directory'
             ",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|source| DbError::ReadFileChunks { source })?;
+        );
+        if let Some(range) = modified_range {
+            query.push(" AND ");
+            push_modified_time_filter(&mut query, "file.modified_unix_seconds", range);
+        }
+
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|source| DbError::ReadFileChunks { source })?;
+
+        rows.into_iter()
+            .map(decode_file_chunk_match_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| DbError::ReadFileChunks { source })
+    }
+
+    pub async fn file_chunk_matches_in_directory_trees(
+        &self,
+        directory_paths: &[String],
+    ) -> Result<Vec<FileChunkMatch>> {
+        self.file_chunk_matches_in_directory_trees_with_modified_range(directory_paths, None)
+            .await
+    }
+
+    pub async fn file_chunk_matches_in_directory_trees_with_modified_range(
+        &self,
+        directory_paths: &[String],
+        modified_range: Option<ModifiedTimeRange>,
+    ) -> Result<Vec<FileChunkMatch>> {
+        if directory_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "
+            SELECT
+                file_path,
+                file_name,
+                directory_path,
+                content,
+                embedding,
+                0 AS is_current,
+                file_modified_unix_seconds,
+                directory_modified_unix_seconds
+            FROM indexed_file_chunk_history
+            WHERE
+            ",
+        );
+        push_directory_tree_filter(&mut query, "directory_path", directory_paths);
+        if let Some(range) = modified_range {
+            query.push(" AND ");
+            push_modified_time_filter(&mut query, "file_modified_unix_seconds", range);
+        }
+        query.push(
+            "
+            UNION ALL
+            SELECT
+                chunk.file_path,
+                file.name AS file_name,
+                chunk.directory_path,
+                chunk.content,
+                chunk.embedding,
+                1 AS is_current,
+                file.modified_unix_seconds AS file_modified_unix_seconds,
+                directory.modified_unix_seconds AS directory_modified_unix_seconds
+            FROM indexed_file_chunks AS chunk
+            INNER JOIN indexed_files AS file
+                ON file.path = chunk.file_path
+            INNER JOIN indexed_documents AS directory
+                ON directory.path = chunk.directory_path
+            WHERE directory.kind = 'directory' AND
+            ",
+        );
+        push_directory_tree_filter(&mut query, "chunk.directory_path", directory_paths);
+        if let Some(range) = modified_range {
+            query.push(" AND ");
+            push_modified_time_filter(&mut query, "file.modified_unix_seconds", range);
+        }
+
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|source| DbError::ReadFileChunks { source })?;
 
         rows.into_iter()
             .map(decode_file_chunk_match_row)
@@ -933,11 +1335,88 @@ async fn migrate_pool(pool: &SqlitePool) -> Result<()> {
         .run(pool)
         .await
         .map_err(|source| DbError::Migrate { source })?;
-    sqlx::query("PRAGMA user_version = 4")
+    sqlx::query("PRAGMA user_version = 6")
         .execute(pool)
         .await
         .map_err(|source| DbError::PrepareLegacyMigration { source })?;
     Ok(())
+}
+
+fn push_directory_term_filter(query: &mut QueryBuilder<'_, Sqlite>, terms: &[String]) {
+    for (index, term) in terms.iter().enumerate() {
+        if index > 0 {
+            query.push(" OR ");
+        }
+        let pattern = format!("%{}%", escape_like_pattern(term));
+        query.push("(");
+        query.push("lower(name) LIKE ");
+        query.push_bind(pattern.clone());
+        query.push(" ESCAPE '\\' OR lower(path) LIKE ");
+        query.push_bind(pattern);
+        query.push(" ESCAPE '\\')");
+    }
+}
+
+fn push_directory_tree_filter(
+    query: &mut QueryBuilder<'_, Sqlite>,
+    column: &'static str,
+    directory_paths: &[String],
+) {
+    for (index, path) in directory_paths.iter().enumerate() {
+        if index > 0 {
+            query.push(" OR ");
+        }
+        let child_pattern = format!("{}/%", escape_like_pattern(path));
+        query.push("(");
+        query.push(column);
+        query.push(" = ");
+        query.push_bind(path.clone());
+        query.push(" OR ");
+        query.push(column);
+        query.push(" LIKE ");
+        query.push_bind(child_pattern);
+        query.push(" ESCAPE '\\')");
+    }
+}
+
+fn push_modified_time_filter(
+    query: &mut QueryBuilder<'_, Sqlite>,
+    column: &'static str,
+    range: ModifiedTimeRange,
+) {
+    let mut has_previous_filter = false;
+    if let Some(start) = range.start_unix_seconds {
+        query.push(column);
+        query.push(" >= ");
+        query.push_bind(start);
+        has_previous_filter = true;
+    }
+    if let Some(end) = range.end_unix_seconds {
+        if has_previous_filter {
+            query.push(" AND ");
+        }
+        query.push(column);
+        query.push(" < ");
+        query.push_bind(end);
+        has_previous_filter = true;
+    }
+    if !has_previous_filter {
+        query.push("1 = 1");
+    }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 async fn prepare_legacy_schema(pool: &SqlitePool) -> Result<()> {
@@ -1022,6 +1501,75 @@ async fn add_legacy_column_if_missing(
     Ok(())
 }
 
+async fn bump_index_revision(transaction: &mut Transaction<'_, Sqlite>) -> Result<()> {
+    sqlx::query(
+        "
+        INSERT INTO index_metadata (key, value)
+        VALUES ('revision', 1)
+        ON CONFLICT(key) DO UPDATE SET value = value + 1
+        ",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|source| DbError::BumpIndexRevision { source })?;
+
+    Ok(())
+}
+
+async fn insert_file_chunk_history(
+    transaction: &mut Transaction<'_, Sqlite>,
+    file: &IndexedFile,
+    chunk: &IndexedFileChunk,
+) -> Result<()> {
+    sqlx::query(
+        "
+        INSERT OR IGNORE INTO indexed_file_chunk_history (
+            file_path,
+            file_name,
+            directory_path,
+            chunk_index,
+            content,
+            embedding,
+            embedding_dim,
+            start_byte,
+            end_byte,
+            content_fingerprint,
+            file_modified_unix_seconds,
+            directory_modified_unix_seconds,
+            indexed_unix_seconds
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+    )
+    .bind(&chunk.file_path)
+    .bind(&file.name)
+    .bind(&chunk.directory_path)
+    .bind(i64::from(chunk.chunk_index))
+    .bind(&chunk.content)
+    .bind(encode_embedding(&chunk.embedding))
+    .bind(
+        i64::try_from(chunk.embedding.len())
+            .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
+    )
+    .bind(
+        i64::try_from(chunk.start_byte)
+            .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+    )
+    .bind(i64::try_from(chunk.end_byte).map_err(|source| DbError::MetadataSizeOverflow { source })?)
+    .bind(&file.content_fingerprint)
+    .bind(file.modified_unix_seconds)
+    .bind(file.modified_unix_seconds)
+    .bind(chunk.indexed_unix_seconds)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|source| DbError::InsertFileChunkHistory {
+        path: chunk.file_path.clone(),
+        chunk_index: chunk.chunk_index,
+        source,
+    })?;
+
+    Ok(())
+}
+
 fn decode_classification_row(
     row: SqliteRow,
 ) -> std::result::Result<DirectoryClassification, sqlx::Error> {
@@ -1070,6 +1618,28 @@ fn decode_document_row(row: SqliteRow) -> std::result::Result<IndexedDocument, s
     })
 }
 
+fn decode_directory_search_row(
+    row: SqliteRow,
+) -> std::result::Result<IndexedDocument, sqlx::Error> {
+    let kind: String = row.try_get("kind")?;
+    let size_bytes: i64 = row.try_get("size_bytes")?;
+    Ok(IndexedDocument {
+        path: row.try_get("path")?,
+        name: row.try_get("name")?,
+        kind: DocumentKind::from_db_value(&kind),
+        parent_path: row.try_get("parent_path")?,
+        searchable_text: String::new(),
+        embedding: Vec::new(),
+        metadata_fingerprint: String::new(),
+        size_bytes: u64::try_from(size_bytes).map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        created_unix_seconds: row.try_get("created_unix_seconds")?,
+        modified_unix_seconds: row.try_get("modified_unix_seconds")?,
+        accessed_unix_seconds: row.try_get("accessed_unix_seconds")?,
+        readonly: row.try_get("readonly")?,
+        indexed_unix_seconds: row.try_get("indexed_unix_seconds")?,
+    })
+}
+
 fn decode_file_chunk_match_row(row: SqliteRow) -> std::result::Result<FileChunkMatch, sqlx::Error> {
     let embedding: Vec<u8> = row.try_get("embedding")?;
     Ok(FileChunkMatch {
@@ -1079,6 +1649,7 @@ fn decode_file_chunk_match_row(row: SqliteRow) -> std::result::Result<FileChunkM
         content: row.try_get("content")?,
         embedding: decode_embedding(&embedding)
             .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        is_current: row.try_get::<i64, _>("is_current")? != 0,
         file_modified_unix_seconds: row.try_get("file_modified_unix_seconds")?,
         directory_modified_unix_seconds: row.try_get("directory_modified_unix_seconds")?,
     })
@@ -1117,6 +1688,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn indexed_mutations_bump_revision() {
+        let db = Database::open_in_memory().await.unwrap();
+        let start = db.current_revision().await.unwrap();
+
+        db.upsert_document(&IndexedDocument {
+            path: "/tmp/project".to_string(),
+            name: "project".to_string(),
+            kind: DocumentKind::Directory,
+            parent_path: Some("/tmp".to_string()),
+            searchable_text: "project readme cargo".to_string(),
+            embedding: vec![0.1, 0.2, 0.3],
+            metadata_fingerprint: "fingerprint".to_string(),
+            size_bytes: 4096,
+            created_unix_seconds: Some(10),
+            modified_unix_seconds: 12,
+            accessed_unix_seconds: Some(14),
+            readonly: false,
+            indexed_unix_seconds: 34,
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.current_revision().await.unwrap(), start + 1);
+
+        db.reset().await.unwrap();
+        assert_eq!(db.current_revision().await.unwrap(), start + 2);
+    }
+
+    #[tokio::test]
     async fn migrates_v1_database_to_metadata_schema() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cds.sqlite");
@@ -1151,7 +1750,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(version, 4);
+        assert_eq!(version, 6);
+        assert_eq!(db.current_revision().await.unwrap(), 0);
         db.upsert_document(&IndexedDocument {
             path: "/tmp/project".to_string(),
             name: "project".to_string(),
@@ -1332,6 +1932,7 @@ mod tests {
         assert_eq!(db.document_count().await.unwrap(), 0);
         assert_eq!(table_count(&db, "indexed_files").await, 0);
         assert_eq!(table_count(&db, "indexed_file_chunks").await, 0);
+        assert_eq!(table_count(&db, "indexed_file_chunk_history").await, 0);
         assert_eq!(table_count(&db, "directory_classifications").await, 0);
         assert!(db.directory_type_counts().await.unwrap().is_empty());
     }

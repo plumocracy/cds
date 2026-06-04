@@ -39,8 +39,9 @@ From the repository root:
 ./install.sh
 ```
 
-The installer runs `cargo install --path .` and adds an idempotent shell integration
-block to your `~/.zshrc` or `~/.bashrc`. After it finishes:
+The installer runs `cargo install --path .`, adds an idempotent shell integration block to
+your `~/.zshrc` or `~/.bashrc`, and starts the indexing daemon in the background. The daemon
+pid and log are written under `~/.cache/cds/` by default. After it finishes:
 
 ```sh
 source ~/.zshrc
@@ -60,26 +61,6 @@ To replace an existing installed binary:
 ```sh
 cargo test --all
 ```
-
-The test suite includes a Docker-backed equivalence test. When Docker is available, it
-mounts this project into a Rust container, builds `cds` without the real embedding
-runtime, generates a fresh random filesystem tree, and compares `cds` against the shell's
-built-in `cd` for exit status, stdout, stderr, `PWD`, `OLDPWD`, and physical path
-behavior.
-
-Use a specific container image with:
-
-```sh
-CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence
-```
-
-Adjust the number of randomized cases with:
-
-```sh
-CDS_DOCKER_RANDOM_CASES=200 cargo test --test docker_cd_equivalence
-```
-
-The Docker image must include Cargo. The default image is `rust:1`.
 
 Default builds include the real local embedding runtime. Use `--no-default-features` with
 `CDS_EMBEDDER=fake` for shell-only checks that do not need `bge-small-en-v1.5`.
@@ -136,11 +117,48 @@ The initial config looks like this:
     "max_excerpt_bytes": 4096,
     "max_entries_per_directory": 80,
     "max_depth_per_top_level_directory": 3,
-    "max_chunk_bytes": 4096
+    "max_chunk_bytes": 4096,
+    "generic_terms": [
+      "a",
+      "an",
+      "and",
+      "app",
+      "application",
+      "code",
+      "dir",
+      "directory",
+      "for",
+      "from",
+      "game",
+      "in",
+      "last",
+      "me",
+      "my",
+      "of",
+      "on",
+      "program",
+      "project",
+      "repo",
+      "repository",
+      "search",
+      "site",
+      "that",
+      "the",
+      "thing",
+      "to",
+      "tool",
+      "web",
+      "website",
+      "with",
+      "work"
+    ]
   },
   "detectors": []
 }
 ```
+
+`generic_terms` controls low-signal query words that should not dominate path filtering or
+ranking. You can add or remove words from that list without reindexing.
 
 Run an indexing pass over configured roots:
 
@@ -153,6 +171,27 @@ Or index explicit roots:
 ```sh
 cds --index ~/Projects ~/work
 ```
+
+Run the indexing daemon in the foreground:
+
+```sh
+cds --daemon
+```
+
+Kill existing cds daemons and start a fresh background daemon:
+
+```sh
+cds --restart-daemon
+```
+
+The daemon keeps the embedding model loaded, polls configured roots for filesystem changes,
+and reindexes changed roots without requiring another manual scan. Generated file chunk
+embeddings are also recorded in an append-only history table keyed by file fingerprint, so
+search can still match earlier content versions after a file changes. On Unix platforms, the
+daemon also opens a local socket under the cds cache directory; normal `cds --search` and
+shell-integration searches use that socket when available so the query can reuse the
+daemon's already-loaded embedding model. If the daemon is not running or the socket cannot be
+created, searches fall back to the normal direct path.
 
 The current indexer stores directory metadata and high-signal text-file content separately
 in SQLite. Directory rows store structured filesystem metadata: name, type, parent path,
@@ -309,14 +348,21 @@ List detected directory types:
 cds --dir-type-count
 ```
 
+Restart the background daemon:
+
+```sh
+cds --restart-daemon
+```
+
 Delete all indexed data from the SQLite database:
 
 ```sh
 cds --reset
 ```
 
-This prompts before deleting directory metadata, file metadata, content chunks, and directory
-type classifications. The database file and schema are kept in place.
+This prompts before deleting directory metadata, file metadata, current and historical
+content chunks, and directory type classifications. The database file and schema are kept in
+place.
 
 When the shell integration is installed, `cds` also tries semantic search automatically for
 plain directory changes that do not look like local `cd` usage. For example, `cds Projects`

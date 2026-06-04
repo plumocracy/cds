@@ -14,6 +14,16 @@ pub fn emit_cd_script(args: &[OsString]) -> Vec<u8> {
     request.to_shell_script()
 }
 
+pub fn emit_cds_command_script(args: &[OsString]) -> Vec<u8> {
+    let mut script = b"command cds".to_vec();
+    for arg in args {
+        script.push(b' ');
+        script.extend(shell_quote(arg));
+    }
+    script.push(b'\n');
+    script
+}
+
 pub fn shell_init(shell: cli::Shell) -> &'static str {
     match shell {
         cli::Shell::Bash => BASH_ZSH_INIT,
@@ -85,7 +95,7 @@ const BASH_ZSH_INIT: &str = r#"cds() {
     local __cds_status
 
     case "${1-}" in
-        --dir-type-count|--init|--index|--reset|--search|--help|-h|--version|-V|--shell-init)
+        --daemon|--dir-type-count|--init|--index|--reset|--restart-daemon|--search|--help|-h|--version|-V|--shell-init)
             command cds "$@"
             return $?
             ;;
@@ -118,6 +128,12 @@ mod tests {
     fn preserves_cd_flags_and_operands() {
         let script = emit_cd_script(&[os("-P"), os("../some path")]);
         assert_eq!(script, b"builtin cd '-P' '../some path'\n");
+    }
+
+    #[test]
+    fn emits_cds_command_script() {
+        let script = emit_cds_command_script(&[os("--restart-daemon")]);
+        assert_eq!(script, b"command cds '--restart-daemon'\n");
     }
 
     #[test]
