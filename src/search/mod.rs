@@ -30,7 +30,7 @@ where
         Self { database, embedder }
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let query_embedding = self
             .embedder
             .embed(query)
@@ -38,6 +38,7 @@ where
         let chunks = self
             .database
             .file_chunk_matches()
+            .await
             .map_err(|source| SearchError::LoadDirectories { source })?;
         let temporal_filter = TemporalFilter::from_query(query);
         let use_deep_target = wants_deep_target(query);
@@ -53,6 +54,7 @@ where
             let classifications = self
                 .database
                 .ancestor_classifications(&chunk.directory_path)
+                .await
                 .map_err(|source| SearchError::LoadDirectories { source })?;
             score += lexical_boost(
                 &query_terms,
@@ -74,6 +76,7 @@ where
             } else {
                 self.database
                     .general_indexed_directory(&chunk.directory_path)
+                    .await
                     .map_err(|source| SearchError::LoadDirectories { source })?
             };
 
@@ -86,11 +89,13 @@ where
         for directory in self
             .database
             .directory_documents()
+            .await
             .map_err(|source| SearchError::LoadDirectories { source })?
         {
             let classifications = self
                 .database
                 .directory_classifications(&directory.path)
+                .await
                 .map_err(|source| SearchError::LoadDirectories { source })?;
             let score = classification_boost(&query_terms, &classifications)
                 + lexical_boost(
@@ -106,6 +111,7 @@ where
             } else {
                 self.database
                     .general_indexed_directory(&directory.path)
+                    .await
                     .map_err(|source| SearchError::LoadDirectories { source })?
             };
 
@@ -291,8 +297,8 @@ mod tests {
     use crate::embed::FakeEmbedder;
     use crate::index::Indexer;
 
-    #[test]
-    fn returns_best_directory_match() {
+    #[tokio::test]
+    async fn returns_best_directory_match() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Projects");
         let chrome = root.join("chrome-extension");
@@ -307,21 +313,23 @@ mod tests {
         fs::write(notes.join("README.md"), "Meeting notes calendar agenda").unwrap();
 
         let settings = Settings::default();
-        let database = Database::open_in_memory().unwrap();
+        let database = Database::open_in_memory().await.unwrap();
         let embedder = FakeEmbedder::default();
         Indexer::new(&settings, &database, &embedder)
             .index_roots(vec![root])
+            .await
             .unwrap();
 
         let results = Searcher::new(&database, &embedder)
             .search("chrome extension", 3)
+            .await
             .unwrap();
 
         assert_eq!(results.first().unwrap().path, chrome.to_string_lossy());
     }
 
-    #[test]
-    fn returns_directory_by_deterministic_type_classification() {
+    #[tokio::test]
+    async fn returns_directory_by_deterministic_type_classification() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Projects");
         let rust = root.join("cds-rust");
@@ -332,21 +340,23 @@ mod tests {
         fs::write(notes.join("README.md"), "rust colored notes without cargo").unwrap();
 
         let settings = Settings::default();
-        let database = Database::open_in_memory().unwrap();
+        let database = Database::open_in_memory().await.unwrap();
         let embedder = FakeEmbedder::default();
         Indexer::new(&settings, &database, &embedder)
             .index_roots(vec![root])
+            .await
             .unwrap();
 
         let results = Searcher::new(&database, &embedder)
             .search("rust project", 3)
+            .await
             .unwrap();
 
         assert_eq!(results.first().unwrap().path, rust.to_string_lossy());
     }
 
-    #[test]
-    fn prefers_deeper_directory_when_query_has_strong_signal() {
+    #[tokio::test]
+    async fn prefers_deeper_directory_when_query_has_strong_signal() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Projects");
         let chrome = root.join("chrome-extension");
@@ -359,14 +369,16 @@ mod tests {
         .unwrap();
 
         let settings = Settings::default();
-        let database = Database::open_in_memory().unwrap();
+        let database = Database::open_in_memory().await.unwrap();
         let embedder = FakeEmbedder::default();
         Indexer::new(&settings, &database, &embedder)
             .index_roots(vec![root])
+            .await
             .unwrap();
 
         let results = Searcher::new(&database, &embedder)
             .search("migrations chrome extension", 3)
+            .await
             .unwrap();
 
         assert_eq!(results.first().unwrap().path, migrations.to_string_lossy());

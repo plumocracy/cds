@@ -35,12 +35,16 @@ where
         }
     }
 
-    pub fn index_configured_roots(&self) -> Result<IndexReport> {
+    pub async fn index_configured_roots(&self) -> Result<IndexReport> {
         let mut progress = NoopProgress;
         self.index_configured_roots_with_progress(&mut progress)
+            .await
     }
 
-    pub fn index_configured_roots_with_progress<P>(&self, progress: &mut P) -> Result<IndexReport>
+    pub async fn index_configured_roots_with_progress<P>(
+        &self,
+        progress: &mut P,
+    ) -> Result<IndexReport>
     where
         P: IndexProgress + ?Sized,
     {
@@ -48,15 +52,15 @@ where
             .settings
             .expanded_roots()
             .map_err(|source| IndexError::ExpandConfiguredRoots { source })?;
-        self.index_roots_with_progress(roots, progress)
+        self.index_roots_with_progress(roots, progress).await
     }
 
-    pub fn index_roots(&self, roots: Vec<PathBuf>) -> Result<IndexReport> {
+    pub async fn index_roots(&self, roots: Vec<PathBuf>) -> Result<IndexReport> {
         let mut progress = NoopProgress;
-        self.index_roots_with_progress(roots, &mut progress)
+        self.index_roots_with_progress(roots, &mut progress).await
     }
 
-    pub fn index_roots_with_progress<P>(
+    pub async fn index_roots_with_progress<P>(
         &self,
         roots: Vec<PathBuf>,
         progress: &mut P,
@@ -80,6 +84,7 @@ where
             if is_excluded_index_root(self.settings, &root) {
                 self.database
                     .delete_path_tree(&root.to_string_lossy())
+                    .await
                     .map_err(|source| IndexError::PruneExcludedPath {
                         path: root.to_string_lossy().into_owned(),
                         source: Box::new(source),
@@ -97,6 +102,7 @@ where
                 &mut report,
                 progress,
             )
+            .await
             .map_err(|source| IndexError::ScanRoot {
                 root: root.clone(),
                 source: Box::new(source),
@@ -121,8 +127,8 @@ mod tests {
     use crate::db::{Database, DocumentKind, IndexedDocument};
     use crate::embed::FakeEmbedder;
 
-    #[test]
-    fn indexes_directory_summaries_and_skips_excluded_paths() {
+    #[tokio::test]
+    async fn indexes_directory_summaries_and_skips_excluded_paths() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Projects");
         let app = root.join("chrome-extension");
@@ -138,7 +144,7 @@ mod tests {
         fs::write(hidden.join("settings.json"), "should not be indexed").unwrap();
 
         let settings = Settings::default();
-        let database = Database::open_in_memory().unwrap();
+        let database = Database::open_in_memory().await.unwrap();
         database
             .upsert_document(&IndexedDocument {
                 path: asset_catalog.to_string_lossy().into_owned(),
@@ -157,6 +163,7 @@ mod tests {
                 readonly: false,
                 indexed_unix_seconds: 0,
             })
+            .await
             .unwrap();
         database
             .upsert_document(&IndexedDocument {
@@ -176,21 +183,23 @@ mod tests {
                 readonly: false,
                 indexed_unix_seconds: 0,
             })
+            .await
             .unwrap();
         let embedder = FakeEmbedder::new(16);
         let indexer = Indexer::new(&settings, &database, &embedder);
 
-        let report = indexer.index_roots(vec![root.clone()]).unwrap();
+        let report = indexer.index_roots(vec![root.clone()]).await.unwrap();
 
         assert_eq!(report.roots_scanned, 1);
         assert_eq!(report.directories_indexed, 3);
         assert_eq!(report.text_files_indexed, 1);
         assert_eq!(report.file_chunks_indexed, 1);
         assert_eq!(report.entries_skipped, 3);
-        assert_eq!(database.document_count().unwrap(), 3);
+        assert_eq!(database.document_count().await.unwrap(), 3);
 
         let app_document = database
             .get_document(&app.to_string_lossy())
+            .await
             .unwrap()
             .expect("app directory is indexed");
         assert!(
@@ -203,23 +212,27 @@ mod tests {
         assert_eq!(
             database
                 .get_document(&asset_catalog.to_string_lossy())
+                .await
                 .unwrap(),
             None
         );
         assert_eq!(
-            database.get_document(&hidden.to_string_lossy()).unwrap(),
+            database
+                .get_document(&hidden.to_string_lossy())
+                .await
+                .unwrap(),
             None
         );
     }
 
-    #[test]
-    fn skips_hidden_roots_and_prunes_stale_rows() {
+    #[tokio::test]
+    async fn skips_hidden_roots_and_prunes_stale_rows() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".hidden-project");
         fs::create_dir_all(&root).unwrap();
 
         let settings = Settings::default();
-        let database = Database::open_in_memory().unwrap();
+        let database = Database::open_in_memory().await.unwrap();
         database
             .upsert_document(&IndexedDocument {
                 path: root.to_string_lossy().into_owned(),
@@ -238,22 +251,26 @@ mod tests {
                 readonly: false,
                 indexed_unix_seconds: 0,
             })
+            .await
             .unwrap();
         let embedder = FakeEmbedder::new(16);
         let indexer = Indexer::new(&settings, &database, &embedder);
 
-        let report = indexer.index_roots(vec![root.clone()]).unwrap();
+        let report = indexer.index_roots(vec![root.clone()]).await.unwrap();
 
         assert_eq!(report.roots_scanned, 0);
         assert_eq!(report.entries_skipped, 1);
         assert_eq!(
-            database.get_document(&root.to_string_lossy()).unwrap(),
+            database
+                .get_document(&root.to_string_lossy())
+                .await
+                .unwrap(),
             None
         );
     }
 
-    #[test]
-    fn limits_recursion_depth_per_top_level_directory() {
+    #[tokio::test]
+    async fn limits_recursion_depth_per_top_level_directory() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Projects");
         let top_level = root.join("app");
@@ -264,7 +281,7 @@ mod tests {
         fs::create_dir_all(&too_deep).unwrap();
 
         let settings = Settings::default();
-        let database = Database::open_in_memory().unwrap();
+        let database = Database::open_in_memory().await.unwrap();
         database
             .upsert_document(&IndexedDocument {
                 path: too_deep.to_string_lossy().into_owned(),
@@ -283,11 +300,12 @@ mod tests {
                 readonly: false,
                 indexed_unix_seconds: 0,
             })
+            .await
             .unwrap();
         let embedder = FakeEmbedder::new(16);
         let indexer = Indexer::new(&settings, &database, &embedder);
 
-        let report = indexer.index_roots(vec![root.clone()]).unwrap();
+        let report = indexer.index_roots(vec![root.clone()]).await.unwrap();
 
         assert_eq!(report.roots_scanned, 1);
         assert_eq!(report.directories_indexed, 5);
@@ -297,23 +315,29 @@ mod tests {
         assert!(
             database
                 .get_document(&root.to_string_lossy())
+                .await
                 .unwrap()
                 .is_some()
         );
         assert!(
             database
                 .get_document(&top_level.to_string_lossy())
+                .await
                 .unwrap()
                 .is_some()
         );
         assert!(
             database
                 .get_document(&depth_three.to_string_lossy())
+                .await
                 .unwrap()
                 .is_some()
         );
         assert_eq!(
-            database.get_document(&too_deep.to_string_lossy()).unwrap(),
+            database
+                .get_document(&too_deep.to_string_lossy())
+                .await
+                .unwrap(),
             None
         );
     }

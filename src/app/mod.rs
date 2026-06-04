@@ -21,21 +21,23 @@ pub struct InitReport {
     pub index: IndexReport,
 }
 
-pub fn init() -> Result<InitReport> {
+pub async fn init() -> Result<InitReport> {
     let mut progress = NoopProgress;
-    init_with_progress(&mut progress)
+    init_with_progress(&mut progress).await
 }
 
-pub fn init_with_progress<P>(progress: &mut P) -> Result<InitReport>
+pub async fn init_with_progress<P>(progress: &mut P) -> Result<InitReport>
 where
     P: IndexProgress + ?Sized,
 {
     let paths = AppPaths::discover()?;
     let settings = Settings::load_or_create(&paths.config_file)?;
-    let database = Database::open(&paths.database_file)?;
+    let database = Database::open(&paths.database_file).await?;
     let embedder = FakeEmbedder::default();
     let indexer = Indexer::new(&settings, &database, &embedder);
-    let index = indexer.index_configured_roots_with_progress(progress)?;
+    let index = indexer
+        .index_configured_roots_with_progress(progress)
+        .await?;
 
     Ok(InitReport {
         config_file: paths.config_file,
@@ -44,23 +46,25 @@ where
     })
 }
 
-pub fn index(roots: Vec<OsString>) -> Result<IndexReport> {
+pub async fn index(roots: Vec<OsString>) -> Result<IndexReport> {
     let mut progress = NoopProgress;
-    index_with_progress(roots, &mut progress)
+    index_with_progress(roots, &mut progress).await
 }
 
-pub fn index_with_progress<P>(roots: Vec<OsString>, progress: &mut P) -> Result<IndexReport>
+pub async fn index_with_progress<P>(roots: Vec<OsString>, progress: &mut P) -> Result<IndexReport>
 where
     P: IndexProgress + ?Sized,
 {
     let paths = AppPaths::discover()?;
     let settings = Settings::load_or_create(&paths.config_file)?;
-    let database = Database::open(&paths.database_file)?;
+    let database = Database::open(&paths.database_file).await?;
     let embedder = FakeEmbedder::default();
     let indexer = Indexer::new(&settings, &database, &embedder);
 
     if roots.is_empty() {
-        return Ok(indexer.index_configured_roots_with_progress(progress)?);
+        return Ok(indexer
+            .index_configured_roots_with_progress(progress)
+            .await?);
     }
 
     let roots = roots
@@ -73,37 +77,37 @@ where
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(indexer.index_roots_with_progress(roots, progress)?)
+    Ok(indexer.index_roots_with_progress(roots, progress).await?)
 }
 
-pub fn search(query: Vec<OsString>, limit: usize) -> Result<Vec<SearchResult>> {
+pub async fn search(query: Vec<OsString>, limit: usize) -> Result<Vec<SearchResult>> {
     let query = join_query(query)?;
-    search_text(&query, limit)
+    search_text(&query, limit).await
 }
 
-pub fn search_text(query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+pub async fn search_text(query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     let paths = AppPaths::discover()?;
-    let database = Database::open_existing(&paths.database_file)?;
+    let database = Database::open_existing(&paths.database_file).await?;
     let embedder = FakeEmbedder::default();
     let searcher = Searcher::new(&database, &embedder);
-    Ok(searcher.search(query, limit)?)
+    Ok(searcher.search(query, limit).await?)
 }
 
-pub fn directory_type_counts() -> Result<Vec<DirectoryTypeCount>> {
+pub async fn directory_type_counts() -> Result<Vec<DirectoryTypeCount>> {
     let paths = AppPaths::discover()?;
-    let database = Database::open_existing(&paths.database_file)?;
-    Ok(database.directory_type_counts()?)
+    let database = Database::open_existing(&paths.database_file).await?;
+    Ok(database.directory_type_counts().await?)
 }
 
-pub fn reset_database() -> Result<()> {
+pub async fn reset_database() -> Result<()> {
     let paths = AppPaths::discover()?;
-    let database = Database::open_existing(&paths.database_file)?;
-    Ok(database.reset()?)
+    let database = Database::open_existing(&paths.database_file).await?;
+    Ok(database.reset().await?)
 }
 
-pub fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
+pub async fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
     if let Some(query) = semantic_query(&args)
-        && let Ok(results) = search_text(&query, 5)
+        && let Ok(results) = search_text(&query, 5).await
         && let Some(result) = results
             .into_iter()
             .find(|result| Path::new(&result.path).is_dir())

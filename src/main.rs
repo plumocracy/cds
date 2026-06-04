@@ -15,7 +15,8 @@ use cds::index::IndexProgress;
 use cds::{error, shell_init};
 use color_eyre::eyre::{Result, WrapErr};
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     if let Err(err) = install_error_reporter() {
         eprintln!("cds: failed to install error reporter: {err}");
         return ExitCode::FAILURE;
@@ -26,7 +27,7 @@ fn main() -> ExitCode {
         Err(err) => err.exit(),
     };
 
-    match run(invocation) {
+    match run(invocation).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             let report = color_eyre::eyre::Report::from(err);
@@ -44,18 +45,18 @@ fn install_error_reporter() -> Result<()> {
         .wrap_err("failed to install color-eyre error reporter")
 }
 
-fn run(invocation: Invocation) -> error::Result<()> {
+async fn run(invocation: Invocation) -> error::Result<()> {
     match invocation {
         Invocation::DirectoryTypeCount => {
-            for count in app::directory_type_counts()? {
+            for count in app::directory_type_counts().await? {
                 println!("{}\t{}", count.count, count.label);
             }
         }
-        Invocation::EmitCd { args } => write_stdout(&app::resolve_cd_script(args))?,
+        Invocation::EmitCd { args } => write_stdout(&app::resolve_cd_script(args).await)?,
         Invocation::ShellInit { shell } => write_stdout(shell_init(shell).as_bytes())?,
         Invocation::Init => {
             let mut progress = TerminalIndexProgress::start();
-            let report = app::init_with_progress(&mut progress)?;
+            let report = app::init_with_progress(&mut progress).await?;
             progress.finish();
             println!("config ready: {}", report.config_file.display());
             println!("database ready: {}", report.database_file.display());
@@ -63,20 +64,20 @@ fn run(invocation: Invocation) -> error::Result<()> {
         }
         Invocation::Index { roots } => {
             let mut progress = TerminalIndexProgress::start();
-            let report = app::index_with_progress(roots, &mut progress)?;
+            let report = app::index_with_progress(roots, &mut progress).await?;
             progress.finish();
             println!("{}", report.human_summary());
         }
         Invocation::Reset => {
             if confirm_reset()? {
-                app::reset_database()?;
+                app::reset_database().await?;
                 println!("database reset");
             } else {
                 println!("reset cancelled");
             }
         }
         Invocation::Search { query } => {
-            let results = app::search(query, 10)?;
+            let results = app::search(query, 10).await?;
             for result in results {
                 println!("{:.3}\t{}", result.score, result.path);
             }
