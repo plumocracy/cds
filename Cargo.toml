@@ -8,6 +8,7 @@ default = ["real-embedder"]
 real-embedder = ["dep:fastembed"]
 
 [dependencies]
+chrono = { version = "0.4.38", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5.40", features = ["cargo"] }
 color-eyre = "0.6.5"
 fastembed = { version = "5.15.0", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"], optional = true }

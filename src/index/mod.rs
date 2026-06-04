@@ -46,7 +46,7 @@ where
         progress: &mut P,
     ) -> Result<IndexReport>
     where
-        P: IndexProgress + ?Sized,
+        P: IndexProgress + Send + ?Sized,
     {
         let roots = self
             .settings
@@ -60,13 +60,31 @@ where
         self.index_roots_with_progress(roots, &mut progress).await
     }
 
+    pub async fn index_file_changes(
+        &self,
+        changed_files: Vec<PathBuf>,
+        deleted_files: Vec<String>,
+    ) -> Result<IndexReport> {
+        let mut report = IndexReport::default();
+        scanner::index_file_changes(
+            changed_files,
+            deleted_files,
+            self.settings,
+            self.database,
+            self.embedder,
+            &mut report,
+        )
+        .await?;
+        Ok(report)
+    }
+
     pub async fn index_roots_with_progress<P>(
         &self,
         roots: Vec<PathBuf>,
         progress: &mut P,
     ) -> Result<IndexReport>
     where
-        P: IndexProgress + ?Sized,
+        P: IndexProgress + Send + ?Sized,
     {
         let mut report = IndexReport::default();
 
@@ -256,6 +274,45 @@ mod tests {
         assert_eq!(report.text_files_indexed, 3);
         assert_eq!(report.file_chunks_indexed, 3);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn indexes_only_changed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Projects");
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let readme = app.join("README.md");
+        let cargo = app.join("Cargo.toml");
+        fs::write(&readme, "initial readme content").unwrap();
+        fs::write(&cargo, "[package]\nname = \"app\"").unwrap();
+
+        let settings = Settings::default();
+        let database = Database::open_in_memory().await.unwrap();
+        let embedder = FakeEmbedder::new(16);
+        let indexer = Indexer::new(&settings, &database, &embedder);
+        indexer.index_roots(vec![root]).await.unwrap();
+
+        fs::write(&readme, "changed readme content").unwrap();
+        let report = indexer
+            .index_file_changes(
+                vec![readme.clone()],
+                vec![cargo.to_string_lossy().into_owned()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.roots_scanned, 0);
+        assert_eq!(report.text_files_indexed, 1);
+        assert_eq!(report.file_chunks_indexed, 1);
+
+        let chunks = database.file_chunk_matches().await.unwrap();
+        assert!(chunks.iter().any(|chunk| chunk.content.contains("changed")));
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| chunk.is_current && chunk.file_path == cargo.to_string_lossy())
+        );
     }
 
     #[tokio::test]

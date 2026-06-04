@@ -13,6 +13,7 @@ use cds::app;
 use cds::cli::{Invocation, parse_invocation};
 use cds::index::IndexProgress;
 use cds::{error, shell_init};
+use chrono::{Local, TimeZone};
 use color_eyre::eyre::{Result, WrapErr};
 
 #[tokio::main]
@@ -47,10 +48,21 @@ fn install_error_reporter() -> Result<()> {
 
 async fn run(invocation: Invocation) -> error::Result<()> {
     match invocation {
+        Invocation::Daemon { run_once } => {
+            if run_once {
+                app::daemon_once().await?;
+            } else {
+                app::daemon().await?;
+            }
+        }
         Invocation::DirectoryTypeCount => {
             for count in app::directory_type_counts().await? {
                 println!("{}\t{}", count.count, count.label);
             }
+        }
+        Invocation::DryRun { query } => {
+            let report = app::dry_run(query, 10).await?;
+            print_dry_run(report);
         }
         Invocation::EmitCd { args } => {
             let mut animation = app::implied_search_query(&args)
@@ -86,6 +98,12 @@ async fn run(invocation: Invocation) -> error::Result<()> {
                 println!("reset cancelled");
             }
         }
+        Invocation::RestartDaemon => {
+            let report = app::restart_daemon()?;
+            println!("killed {} cds daemon(s)", report.killed_daemons);
+            println!("started cds daemon with pid {}", report.pid);
+            println!("daemon log: {}", report.log_file.display());
+        }
         Invocation::Search { query } => {
             let mut animation = SearchAnimation::start();
             let results = app::search(query, 10).await;
@@ -99,6 +117,103 @@ async fn run(invocation: Invocation) -> error::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_dry_run(report: cds::search::SearchDryRun) {
+    println!("query: {}", report.query);
+    println!();
+
+    println!("directory cache:");
+    println!("  status: {}", report.cache.status.as_str());
+    println!("  directories: {}", report.cache.directory_count);
+    println!();
+
+    println!("temporal parse:");
+    match &report.temporal.matched_phrase {
+        Some(phrase) => println!("  matched phrase: {phrase}"),
+        None => println!("  matched phrase: (none)"),
+    }
+    println!("  cleaned query: {}", report.temporal.cleaned_query);
+    println!("  semantic query: {}", report.temporal.semantic_query);
+    print_temporal_bound("  modified start", report.temporal.start_unix_seconds);
+    print_temporal_bound("  modified end", report.temporal.end_unix_seconds);
+    println!();
+
+    print_string_section("candidate terms", &report.candidate_terms);
+    print_string_section(
+        "sql directory candidates",
+        &report.sql_candidate_directories,
+    );
+    print_string_section(
+        "fuzzy/partial directory candidates added",
+        &report.fuzzy_candidate_directories,
+    );
+
+    println!("embedding scores ({}):", report.embedding_scores.len());
+    if report.embedding_scores.is_empty() {
+        println!("  (none)");
+    } else {
+        for score in &report.embedding_scores {
+            let state = if score.is_current {
+                "current"
+            } else {
+                "history"
+            };
+            println!(
+                "  {:.6}\t{}\tdir={}\tfile={}\t{}",
+                score.cosine_score,
+                state,
+                score.directory_path,
+                score.file_path,
+                score.content_preview
+            );
+        }
+    }
+    println!();
+
+    println!("final scores ({}):", report.results.len());
+    if report.results.is_empty() {
+        println!("  (none)");
+    } else {
+        for result in &report.results {
+            println!("  {:.3}\t{}", result.score, result.path);
+        }
+    }
+    println!();
+
+    println!("winner:");
+    if let Some(winner) = report.results.first() {
+        println!("  {:.3}\t{}", winner.score, winner.path);
+    } else {
+        println!("  (none)");
+    }
+}
+
+fn print_temporal_bound(label: &str, value: Option<i64>) {
+    match value {
+        Some(value) => println!("{label}: {value} ({})", format_unix_seconds(value)),
+        None => println!("{label}: (none)"),
+    }
+}
+
+fn format_unix_seconds(value: i64) -> String {
+    Local
+        .timestamp_opt(value, 0)
+        .single()
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+        .unwrap_or_else(|| "invalid local time".to_string())
+}
+
+fn print_string_section(label: &str, values: &[String]) {
+    println!("{label} ({}):", values.len());
+    if values.is_empty() {
+        println!("  (none)");
+    } else {
+        for value in values {
+            println!("  {value}");
+        }
+    }
+    println!();
 }
 
 fn write_stdout(bytes: &[u8]) -> error::Result<()> {
@@ -324,6 +439,10 @@ impl Drop for TerminalIndexProgress {
 
 impl IndexProgress for TerminalIndexProgress {
     fn directory_started(&mut self, directory: &Path) {
+        self.status(&directory.display().to_string());
+    }
+
+    fn status(&mut self, message: &str) {
         if !self.enabled {
             return;
         }
@@ -332,7 +451,7 @@ impl IndexProgress for TerminalIndexProgress {
             return;
         };
 
-        state.current_directory = Some(directory.display().to_string());
+        state.current_directory = Some(message.to_string());
         state.tick = 0;
         render_progress_line(&mut state);
     }

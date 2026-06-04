@@ -73,6 +73,8 @@ pub struct IndexSettings {
     pub max_depth_per_top_level_directory: usize,
     #[serde(default = "default_max_chunk_bytes")]
     pub max_chunk_bytes: usize,
+    #[serde(default = "default_generic_terms")]
+    pub generic_terms: Vec<String>,
 }
 
 impl IndexSettings {
@@ -123,6 +125,7 @@ impl Default for IndexSettings {
             max_entries_per_directory: 80,
             max_depth_per_top_level_directory: default_max_depth_per_top_level_directory(),
             max_chunk_bytes: default_max_chunk_bytes(),
+            generic_terms: default_generic_terms(),
         }
     }
 }
@@ -133,6 +136,46 @@ const fn default_max_depth_per_top_level_directory() -> usize {
 
 const fn default_max_chunk_bytes() -> usize {
     4_096
+}
+
+pub fn default_generic_terms() -> Vec<String> {
+    [
+        "a",
+        "an",
+        "and",
+        "app",
+        "application",
+        "code",
+        "dir",
+        "directory",
+        "for",
+        "from",
+        "game",
+        "in",
+        "last",
+        "me",
+        "my",
+        "of",
+        "on",
+        "program",
+        "project",
+        "repo",
+        "repository",
+        "search",
+        "site",
+        "that",
+        "the",
+        "thing",
+        "to",
+        "tool",
+        "web",
+        "website",
+        "with",
+        "work",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn matches_exclude_pattern(pattern: &str, name: &str) -> bool {
@@ -289,6 +332,7 @@ mod tests {
 
         assert_eq!(parsed.index.max_depth_per_top_level_directory, 3);
         assert_eq!(parsed.index.max_chunk_bytes, 4096);
+        assert_eq!(parsed.index.generic_terms, default_generic_terms());
         assert!(parsed.detectors.is_empty());
     }
 

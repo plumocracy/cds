@@ -2,15 +2,18 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 
 use clap::builder::OsStringValueParser;
-use clap::{Arg, ArgAction, Command, error::ErrorKind};
+use clap::{Arg, ArgAction, ArgGroup, Command, error::ErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
+    Daemon { run_once: bool },
     DirectoryTypeCount,
+    DryRun { query: Vec<OsString> },
     EmitCd { args: Vec<OsString> },
     Index { roots: Vec<OsString> },
     Init,
     Reset,
+    RestartDaemon,
     Search { query: Vec<OsString> },
     ShellInit { shell: Shell },
 }
@@ -60,8 +63,24 @@ pub fn parse_invocation(
         return Ok(Invocation::EmitCd { args });
     }
 
+    if matches.get_flag("daemon") {
+        return Ok(Invocation::Daemon { run_once: false });
+    }
+
+    if matches.get_flag("daemon-once") {
+        return Ok(Invocation::Daemon { run_once: true });
+    }
+
     if matches.get_flag("dir-type-count") {
         return Ok(Invocation::DirectoryTypeCount);
+    }
+
+    if matches.contains_id("dry-run") {
+        let query = matches
+            .get_many::<OsString>("dry-run")
+            .map(|query| query.cloned().collect())
+            .unwrap_or_default();
+        return Ok(Invocation::DryRun { query });
     }
 
     if matches.get_flag("init") {
@@ -70,6 +89,10 @@ pub fn parse_invocation(
 
     if matches.get_flag("reset") {
         return Ok(Invocation::Reset);
+    }
+
+    if matches.get_flag("restart-daemon") {
+        return Ok(Invocation::RestartDaemon);
     }
 
     if matches.contains_id("index") {
@@ -105,15 +128,42 @@ pub fn command() -> Command {
         .about("cd with semantic search")
         .version(clap::crate_version!())
         .disable_help_subcommand(true)
+        .group(ArgGroup::new("mode").args([
+            "daemon",
+            "daemon-once",
+            "dir-type-count",
+            "dry-run",
+            "emit-cd",
+            "index",
+            "init",
+            "reset",
+            "restart-daemon",
+            "search",
+            "shell-init",
+        ]))
+        .arg(
+            Arg::new("daemon")
+                .long("daemon")
+                .help("Run the cds indexing daemon in the foreground")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("daemon-once")
+                .long("daemon-once")
+                .hide(true)
+                .action(ArgAction::SetTrue),
+        )
         .arg(
             Arg::new("init")
                 .long("init")
                 .help("Create the default config and database, then index configured roots")
                 .conflicts_with_all([
                     "dir-type-count",
+                    "dry-run",
                     "emit-cd",
                     "index",
                     "reset",
+                    "restart-daemon",
                     "search",
                     "shell-init",
                 ])
@@ -123,7 +173,15 @@ pub fn command() -> Command {
             Arg::new("dir-type-count")
                 .long("dir-type-count")
                 .help("Print detected directory type counts")
-                .conflicts_with_all(["emit-cd", "index", "init", "reset", "search", "shell-init"])
+                .conflicts_with_all([
+                    "dry-run",
+                    "emit-cd",
+                    "index",
+                    "init",
+                    "reset",
+                    "search",
+                    "shell-init",
+                ])
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -132,9 +190,29 @@ pub fn command() -> Command {
                 .help("Delete all indexed data from the cds database")
                 .conflicts_with_all([
                     "dir-type-count",
+                    "dry-run",
                     "emit-cd",
                     "index",
                     "init",
+                    "restart-daemon",
+                    "search",
+                    "shell-init",
+                ])
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("restart-daemon")
+                .long("restart-daemon")
+                .help("Kill existing cds daemons and start a fresh one")
+                .conflicts_with_all([
+                    "daemon",
+                    "daemon-once",
+                    "dir-type-count",
+                    "dry-run",
+                    "emit-cd",
+                    "index",
+                    "init",
+                    "reset",
                     "search",
                     "shell-init",
                 ])
@@ -154,10 +232,12 @@ pub fn command() -> Command {
                 .default_missing_value("")
                 .conflicts_with_all([
                     "dir-type-count",
+                    "dry-run",
                     "emit-cd",
                     "index",
                     "init",
                     "reset",
+                    "restart-daemon",
                     "search",
                 ])
                 .value_parser(OsStringValueParser::new()),
@@ -174,9 +254,29 @@ pub fn command() -> Command {
                 .num_args(0..)
                 .conflicts_with_all([
                     "dir-type-count",
+                    "dry-run",
                     "emit-cd",
                     "init",
                     "reset",
+                    "restart-daemon",
+                    "search",
+                    "shell-init",
+                ])
+                .value_parser(OsStringValueParser::new()),
+        )
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .value_name("QUERY")
+                .help("Print SQL candidates, embedding scores, and the winning directory")
+                .num_args(1..)
+                .conflicts_with_all([
+                    "dir-type-count",
+                    "emit-cd",
+                    "index",
+                    "init",
+                    "reset",
+                    "restart-daemon",
                     "search",
                     "shell-init",
                 ])
@@ -190,10 +290,12 @@ pub fn command() -> Command {
                 .num_args(1..)
                 .conflicts_with_all([
                     "dir-type-count",
+                    "dry-run",
                     "emit-cd",
                     "index",
                     "init",
                     "reset",
+                    "restart-daemon",
                     "shell-init",
                 ])
                 .value_parser(OsStringValueParser::new()),
@@ -207,6 +309,7 @@ pub fn command() -> Command {
                 .allow_hyphen_values(true)
                 .conflicts_with_all([
                     "dir-type-count",
+                    "dry-run",
                     "index",
                     "init",
                     "reset",
@@ -286,6 +389,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_restart_daemon() {
+        assert_eq!(
+            parse_invocation([os("--restart-daemon")]).unwrap(),
+            Invocation::RestartDaemon
+        );
+    }
+
+    #[test]
+    fn parses_daemon() {
+        assert_eq!(
+            parse_invocation([os("--daemon")]).unwrap(),
+            Invocation::Daemon { run_once: false }
+        );
+    }
+
+    #[test]
+    fn parses_daemon_once() {
+        assert_eq!(
+            parse_invocation([os("--daemon-once")]).unwrap(),
+            Invocation::Daemon { run_once: true }
+        );
+    }
+
+    #[test]
     fn init_word_is_cd_input_inside_hidden_emit() {
         assert_eq!(
             parse_invocation([os("--cds-emit"), os("--"), os("init")]).unwrap(),
@@ -329,6 +456,16 @@ mod tests {
             parse_invocation([os("--search"), os("chrome"), os("extension")]).unwrap(),
             Invocation::Search {
                 query: vec![os("chrome"), os("extension")]
+            }
+        );
+    }
+
+    #[test]
+    fn parses_dry_run_query() {
+        assert_eq!(
+            parse_invocation([os("--dry-run"), os("github"), os("clone")]).unwrap(),
+            Invocation::DryRun {
+                query: vec![os("github"), os("clone")]
             }
         );
     }

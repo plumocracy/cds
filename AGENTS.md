@@ -105,10 +105,12 @@ Current user-facing commands:
 
 ```sh
 cds --init
+cds --daemon
 cds --index [PATH...]
 cds --search QUERY...
 cds --dir-type-count
 cds --reset
+cds --restart-daemon
 cds --shell-init [bash|zsh]
 ```
 

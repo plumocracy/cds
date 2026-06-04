@@ -112,6 +112,42 @@ fn dir_type_count_lists_detected_directory_types() {
 }
 
 #[test]
+fn daemon_once_indexes_configured_roots() {
+    let fixture = SearchFixture::new();
+
+    let daemon = fixture.cds().arg("--daemon-once").output().unwrap();
+
+    assert!(
+        daemon.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&daemon.stderr)
+    );
+
+    let search = fixture
+        .cds()
+        .arg("--search")
+        .arg("manifest")
+        .output()
+        .unwrap();
+    assert!(
+        search.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&search.stderr)
+            .contains("cds: warning: daemon unavailable or busy; searching locally"),
+        "stderr: {}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    assert!(
+        String::from_utf8(search.stdout)
+            .unwrap()
+            .contains("chrome-extension")
+    );
+}
+
+#[test]
 fn reset_prompts_and_deletes_indexed_data_when_confirmed() {
     let fixture = SearchFixture::new();
     fixture.init();

@@ -6,4 +6,5 @@ pub use error::ConfigError;
 pub use paths::{AppPaths, expand_tilde};
 pub use settings::{
     DirectoryTypeDefinition, DirectoryTypeRule, DirectoryTypeSignal, IndexSettings, Settings,
+    default_generic_terms,
 };
