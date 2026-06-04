@@ -82,6 +82,12 @@ pub enum DbError {
         source: sqlx::Error,
     },
 
+    #[error("failed to commit indexed file batch")]
+    CommitFileBatch {
+        #[source]
+        source: sqlx::Error,
+    },
+
     #[error("failed to replace classifications for {path}")]
     ReplaceDirectoryClassifications {
         path: String,

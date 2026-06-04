@@ -240,6 +240,130 @@ impl Database {
         Ok(())
     }
 
+    pub async fn upsert_files_with_chunks(
+        &self,
+        files: &[(&IndexedFile, &[IndexedFileChunk])],
+    ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|source| DbError::UpsertFile {
+                path: "<batch>".to_string(),
+                source,
+            })?;
+
+        for (file, chunks) in files {
+            sqlx::query(
+                "
+                INSERT INTO indexed_files (
+                    path,
+                    directory_path,
+                    name,
+                    extension,
+                    size_bytes,
+                    created_unix_seconds,
+                    modified_unix_seconds,
+                    accessed_unix_seconds,
+                    readonly,
+                    content_fingerprint,
+                    indexed_unix_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    directory_path = excluded.directory_path,
+                    name = excluded.name,
+                    extension = excluded.extension,
+                    size_bytes = excluded.size_bytes,
+                    created_unix_seconds = excluded.created_unix_seconds,
+                    modified_unix_seconds = excluded.modified_unix_seconds,
+                    accessed_unix_seconds = excluded.accessed_unix_seconds,
+                    readonly = excluded.readonly,
+                    content_fingerprint = excluded.content_fingerprint,
+                    indexed_unix_seconds = excluded.indexed_unix_seconds
+                ",
+            )
+            .bind(&file.path)
+            .bind(&file.directory_path)
+            .bind(&file.name)
+            .bind(&file.extension)
+            .bind(
+                i64::try_from(file.size_bytes)
+                    .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+            )
+            .bind(file.created_unix_seconds)
+            .bind(file.modified_unix_seconds)
+            .bind(file.accessed_unix_seconds)
+            .bind(file.readonly)
+            .bind(&file.content_fingerprint)
+            .bind(file.indexed_unix_seconds)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::UpsertFile {
+                path: file.path.clone(),
+                source,
+            })?;
+
+            sqlx::query("DELETE FROM indexed_file_chunks WHERE file_path = ?")
+                .bind(&file.path)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|source| DbError::DeleteFileChunks {
+                    path: file.path.clone(),
+                    source,
+                })?;
+
+            for chunk in *chunks {
+                sqlx::query(
+                    "
+                    INSERT INTO indexed_file_chunks (
+                        file_path,
+                        directory_path,
+                        chunk_index,
+                        content,
+                        embedding,
+                        embedding_dim,
+                        start_byte,
+                        end_byte,
+                        indexed_unix_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ",
+                )
+                .bind(&chunk.file_path)
+                .bind(&chunk.directory_path)
+                .bind(i64::from(chunk.chunk_index))
+                .bind(&chunk.content)
+                .bind(encode_embedding(&chunk.embedding))
+                .bind(
+                    i64::try_from(chunk.embedding.len())
+                        .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
+                )
+                .bind(
+                    i64::try_from(chunk.start_byte)
+                        .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+                )
+                .bind(
+                    i64::try_from(chunk.end_byte)
+                        .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+                )
+                .bind(chunk.indexed_unix_seconds)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|source| DbError::InsertFileChunk {
+                    path: chunk.file_path.clone(),
+                    chunk_index: chunk.chunk_index,
+                    source,
+                })?;
+            }
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::CommitFileBatch { source })?;
+
+        Ok(())
+    }
+
     pub async fn replace_directory_classifications(
         &self,
         directory_path: &str,

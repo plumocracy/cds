@@ -16,6 +16,10 @@ pub trait Embedder {
         self.embed(text)
     }
 
+    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|text| self.embed_document(text)).collect()
+    }
+
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         self.embed(text)
     }

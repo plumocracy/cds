@@ -122,10 +122,14 @@ fn is_excluded_index_root(settings: &Settings, root: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
     use crate::db::{Database, DocumentKind, IndexedDocument};
-    use crate::embed::FakeEmbedder;
+    use crate::embed::{Embedder, FakeEmbedder};
 
     #[tokio::test]
     async fn indexes_directory_summaries_and_skips_excluded_paths() {
@@ -229,6 +233,29 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn batches_file_chunk_embeddings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Projects");
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("one.txt"), "alpha").unwrap();
+        fs::write(app.join("two.txt"), "bravo").unwrap();
+        fs::write(app.join("three.txt"), "charlie").unwrap();
+
+        let settings = Settings::default();
+        let database = Database::open_in_memory().await.unwrap();
+        let embedder = CountingEmbedder::new(16);
+        let calls = Arc::clone(&embedder.document_batch_calls);
+        let indexer = Indexer::new(&settings, &database, &embedder);
+
+        let report = indexer.index_roots(vec![root]).await.unwrap();
+
+        assert_eq!(report.text_files_indexed, 3);
+        assert_eq!(report.file_chunks_indexed, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -346,5 +373,35 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[derive(Debug)]
+    struct CountingEmbedder {
+        dimensions: usize,
+        document_batch_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingEmbedder {
+        fn new(dimensions: usize) -> Self {
+            Self {
+                dimensions,
+                document_batch_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Embedder for CountingEmbedder {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn embed(&self, _text: &str) -> crate::embed::Result<Vec<f32>> {
+            Ok(vec![1.0; self.dimensions])
+        }
+
+        fn embed_documents(&self, texts: &[String]) -> crate::embed::Result<Vec<Vec<f32>>> {
+            self.document_batch_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![vec![1.0; self.dimensions]; texts.len()])
+        }
     }
 }

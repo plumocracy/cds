@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Settings;
 use crate::db::{IndexedFile, IndexedFileChunk};
-use crate::embed::Embedder;
 use crate::index::{IndexError, Result};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,15 +13,60 @@ pub struct IndexedFileData {
     pub chunks: Vec<IndexedFileChunk>,
 }
 
-pub fn index_text_file<E>(
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedIndexedFileData {
+    pub file: IndexedFile,
+    pub chunks: Vec<PreparedFileChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFileChunk {
+    pub file_path: String,
+    pub directory_path: String,
+    pub chunk_index: u32,
+    pub content: String,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub indexed_unix_seconds: i64,
+}
+
+impl PreparedIndexedFileData {
+    pub fn into_indexed(self, embeddings: &mut impl Iterator<Item = Vec<f32>>) -> IndexedFileData {
+        let chunks = self
+            .chunks
+            .into_iter()
+            .map(|chunk| {
+                chunk.into_indexed(embeddings.next().expect("embedding count is validated"))
+            })
+            .collect();
+
+        IndexedFileData {
+            file: self.file,
+            chunks,
+        }
+    }
+}
+
+impl PreparedFileChunk {
+    fn into_indexed(self, embedding: Vec<f32>) -> IndexedFileChunk {
+        IndexedFileChunk {
+            file_path: self.file_path,
+            directory_path: self.directory_path,
+            chunk_index: self.chunk_index,
+            content: self.content,
+            embedding,
+            start_byte: self.start_byte,
+            end_byte: self.end_byte,
+            indexed_unix_seconds: self.indexed_unix_seconds,
+        }
+    }
+}
+
+pub fn prepare_text_file(
     path: &Path,
     directory: &Path,
     settings: &Settings,
-    embedder: &E,
-) -> Result<Option<IndexedFileData>>
-where
-    E: Embedder,
-{
+) -> Result<Option<PreparedIndexedFileData>> {
     let metadata = fs::metadata(path).map_err(|source| IndexError::StatFile {
         path: path.to_path_buf(),
         source,
@@ -81,27 +125,18 @@ where
         .into_iter()
         .enumerate()
     {
-        let embedding =
-            embedder
-                .embed_document(chunk.text)
-                .map_err(|source| IndexError::EmbedSummary {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-
-        chunks.push(IndexedFileChunk {
+        chunks.push(PreparedFileChunk {
             file_path: file_path.clone(),
             directory_path: directory_path.clone(),
             chunk_index: u32::try_from(chunk_index).unwrap_or(u32::MAX),
             content: chunk.text.to_string(),
-            embedding,
             start_byte: chunk.start_byte,
             end_byte: chunk.end_byte,
             indexed_unix_seconds,
         });
     }
 
-    Ok(Some(IndexedFileData { file, chunks }))
+    Ok(Some(PreparedIndexedFileData { file, chunks }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
