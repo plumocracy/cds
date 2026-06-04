@@ -52,7 +52,17 @@ async fn run(invocation: Invocation) -> error::Result<()> {
                 println!("{}\t{}", count.count, count.label);
             }
         }
-        Invocation::EmitCd { args } => write_stdout(&app::resolve_cd_script(args).await)?,
+        Invocation::EmitCd { args } => {
+            let mut animation = app::implied_search_query(&args)
+                .is_some()
+                .then(SearchAnimation::start);
+            let script = app::resolve_cd_script(args).await;
+            if let Some(animation) = &mut animation {
+                animation.finish();
+            }
+
+            write_stdout(&script)?;
+        }
         Invocation::ShellInit { shell } => write_stdout(shell_init(shell).as_bytes())?,
         Invocation::Init => {
             let mut progress = TerminalIndexProgress::start();

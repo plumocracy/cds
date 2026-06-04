@@ -106,7 +106,7 @@ pub async fn reset_database() -> Result<()> {
 }
 
 pub async fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
-    if let Some(query) = semantic_query(&args)
+    if let Some(query) = implied_search_query(&args)
         && let Ok(results) = search_text(&query, 5).await
         && let Some(result) = results
             .into_iter()
@@ -116,6 +116,10 @@ pub async fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
     }
 
     crate::emit_cd_script(&args)
+}
+
+pub fn implied_search_query(args: &[OsString]) -> Option<String> {
+    semantic_query(args)
 }
 
 fn join_query(query: Vec<OsString>) -> Result<String> {
@@ -309,5 +313,12 @@ mod tests {
             semantic_query_in(&[os("chrome"), os("extension")], Some(temp.path())),
             Some("chrome extension".to_string())
         );
+    }
+
+    #[test]
+    fn implied_search_query_uses_cd_semantic_rules() {
+        assert_eq!(implied_search_query(&[os("-P"), os("Projects")]), None);
+        assert_eq!(implied_search_query(&[os("../Projects")]), None);
+        assert_eq!(implied_search_query(&[]), None);
     }
 }
