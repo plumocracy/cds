@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -10,12 +11,24 @@ fn docker_cd_equivalence_random_tree() {
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let image = std::env::var("CDS_DOCKER_IMAGE").unwrap_or_else(|_| "rust:1-slim".to_string());
+    let cache_root = std::env::var_os("CDS_DOCKER_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("target/docker-cache"));
+    let cargo_cache = cache_root.join("cargo");
+    let target_cache = cache_root.join("target");
+
+    fs::create_dir_all(&cargo_cache).expect("docker cargo cache directory is created");
+    fs::create_dir_all(&target_cache).expect("docker target cache directory is created");
 
     let output = Command::new("docker")
         .arg("run")
         .arg("--rm")
         .arg("--volume")
         .arg(format!("{}:/workspace", manifest_dir.display()))
+        .arg("--volume")
+        .arg(format!("{}:/tmp/cargo", cargo_cache.display()))
+        .arg("--volume")
+        .arg(format!("{}:/tmp/cds-target", target_cache.display()))
         .arg("--workdir")
         .arg("/workspace")
         .arg("--env")
