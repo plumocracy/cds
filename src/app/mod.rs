@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{AppPaths, Settings, expand_tilde};
 use crate::db::{Database, DirectoryTypeCount};
-use crate::embed::FakeEmbedder;
-use crate::error::{Result, app_err, config_err};
+use crate::embed::{BgeSmallEmbedder, Embedder, FakeEmbedder};
+use crate::error::{Result, app_err, config_err, embed_err};
 use crate::index::{IndexProgress, IndexReport, Indexer, NoopProgress};
 use crate::search::{SearchResult, Searcher};
 
@@ -33,7 +33,7 @@ where
     let paths = AppPaths::discover()?;
     let settings = Settings::load_or_create(&paths.config_file)?;
     let database = Database::open(&paths.database_file).await?;
-    let embedder = FakeEmbedder::default();
+    let embedder = RuntimeEmbedder::load(&paths)?;
     let indexer = Indexer::new(&settings, &database, &embedder);
     let index = indexer
         .index_configured_roots_with_progress(progress)
@@ -58,7 +58,7 @@ where
     let paths = AppPaths::discover()?;
     let settings = Settings::load_or_create(&paths.config_file)?;
     let database = Database::open(&paths.database_file).await?;
-    let embedder = FakeEmbedder::default();
+    let embedder = RuntimeEmbedder::load(&paths)?;
     let indexer = Indexer::new(&settings, &database, &embedder);
 
     if roots.is_empty() {
@@ -88,7 +88,7 @@ pub async fn search(query: Vec<OsString>, limit: usize) -> Result<Vec<SearchResu
 pub async fn search_text(query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     let paths = AppPaths::discover()?;
     let database = Database::open_existing(&paths.database_file).await?;
-    let embedder = FakeEmbedder::default();
+    let embedder = RuntimeEmbedder::load(&paths)?;
     let searcher = Searcher::new(&database, &embedder);
     Ok(searcher.search(query, limit).await?)
 }
@@ -202,6 +202,54 @@ fn current_shell_directory() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
         .or_else(|| env::current_dir().ok())
+}
+
+enum RuntimeEmbedder {
+    Bge(Box<BgeSmallEmbedder>),
+    Fake(FakeEmbedder),
+}
+
+impl RuntimeEmbedder {
+    fn load(paths: &AppPaths) -> Result<Self> {
+        if env::var("CDS_EMBEDDER").is_ok_and(|value| value.eq_ignore_ascii_case("fake")) {
+            return Ok(Self::Fake(FakeEmbedder::default()));
+        }
+
+        BgeSmallEmbedder::new(&paths.cache_dir)
+            .map(Box::new)
+            .map(Self::Bge)
+            .map_err(embed_err)
+    }
+}
+
+impl Embedder for RuntimeEmbedder {
+    fn dimensions(&self) -> usize {
+        match self {
+            Self::Bge(embedder) => embedder.dimensions(),
+            Self::Fake(embedder) => embedder.dimensions(),
+        }
+    }
+
+    fn embed(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
+        match self {
+            Self::Bge(embedder) => embedder.embed(text),
+            Self::Fake(embedder) => embedder.embed(text),
+        }
+    }
+
+    fn embed_document(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
+        match self {
+            Self::Bge(embedder) => embedder.embed_document(text),
+            Self::Fake(embedder) => embedder.embed_document(text),
+        }
+    }
+
+    fn embed_query(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
+        match self {
+            Self::Bge(embedder) => embedder.embed_query(text),
+            Self::Fake(embedder) => embedder.embed_query(text),
+        }
+    }
 }
 
 #[cfg(test)]

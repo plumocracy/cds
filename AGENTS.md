@@ -44,11 +44,11 @@ Prefer stable, well-maintained crates:
 
 For embeddings, prefer an implementation path that keeps the tool locally usable:
 
-- Use `bge-small-en-v1.5` through a local model runtime such as ONNX Runtime, Candle, or
-  another Rust-friendly inference backend.
+- Use `BAAI/bge-small-en-v1.5` through FastEmbed/ONNX for production text embeddings.
 - Do not introduce a hosted embedding API as the default path.
 - If model download/setup is needed, make it explicit and cache model files outside the
   repo in a user cache directory.
+- Keep deterministic fake embeddings available for normal tests with `CDS_EMBEDDER=fake`.
 
 ## Suggested Architecture
 

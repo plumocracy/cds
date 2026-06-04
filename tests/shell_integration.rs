@@ -72,7 +72,7 @@ expected="$(cd "$tmp/a" && pwd -P)"
 home="$tmp/home"
 mkdir -p "$home/Projects/cli-init-test"
 printf 'shell integration init project\n' > "$home/Projects/cli-init-test/README.md"
-HOME="$home" CDS_CONFIG_DIR="$tmp/config" CDS_DATA_DIR="$tmp/data" CDS_CACHE_DIR="$tmp/cache" cds --init >/tmp/cds-shell-init.out
+HOME="$home" CDS_EMBEDDER="fake" CDS_CONFIG_DIR="$tmp/config" CDS_DATA_DIR="$tmp/data" CDS_CACHE_DIR="$tmp/cache" cds --init >/tmp/cds-shell-init.out
 [ -f "$tmp/config/config.json" ]
 [ -f "$tmp/data/cds.sqlite" ]
 "#

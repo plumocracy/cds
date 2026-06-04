@@ -143,9 +143,10 @@ Hidden directories are always skipped and pruned from the local index. Each conf
 root is treated as a container, and each top-level directory inside it is indexed only through
 `max_depth_per_top_level_directory` levels.
 
-The embedder is still deterministic and fake for now. That is deliberate: it lets the config,
-schema, scanning, and ranking plumbing settle before the real `bge-small-en-v1.5` runtime is
-wired in.
+Text-file chunks are embedded locally with `BAAI/bge-small-en-v1.5` through FastEmbed/ONNX.
+Model files are cached under `~/.cache/cds/models` by default, or under `CDS_CACHE_DIR/models`
+when that environment variable is set. Tests can force deterministic fake embeddings with
+`CDS_EMBEDDER=fake`.
 
 ## Directory Types
 

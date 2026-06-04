@@ -81,12 +81,13 @@ where
         .into_iter()
         .enumerate()
     {
-        let embedding = embedder
-            .embed(chunk.text)
-            .map_err(|source| IndexError::EmbedSummary {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let embedding =
+            embedder
+                .embed_document(chunk.text)
+                .map_err(|source| IndexError::EmbedSummary {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
 
         chunks.push(IndexedFileChunk {
             file_path: file_path.clone(),

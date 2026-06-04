@@ -33,7 +33,7 @@ where
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let query_embedding = self
             .embedder
-            .embed(query)
+            .embed_query(query)
             .map_err(|source| SearchError::EmbedQuery { source })?;
         let chunks = self
             .database

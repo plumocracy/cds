@@ -147,6 +147,7 @@ impl SearchFixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cds"));
         command
             .env("HOME", self.temp.path())
+            .env("CDS_EMBEDDER", "fake")
             .env("CDS_CONFIG_DIR", self.temp.path().join("config"))
             .env("CDS_DATA_DIR", self.temp.path().join("data"))
             .env("CDS_CACHE_DIR", self.temp.path().join("cache"));
