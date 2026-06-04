@@ -69,8 +69,11 @@ stdout, stderr, `PWD`, `OLDPWD`, and physical path behavior.
 Use a specific container image with:
 
 ```sh
-CDS_DOCKER_IMAGE=rust:1-slim cargo test --test docker_cd_equivalence
+CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence
 ```
+
+The Docker image must include Cargo and the C++ standard library/linker support required by
+the embedding runtime. The default image is `rust:1`.
 
 ## Indexing
 

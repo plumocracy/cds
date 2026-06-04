@@ -23,7 +23,7 @@ fn docker_cd_equivalence_random_tree() {
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let image = std::env::var("CDS_DOCKER_IMAGE").unwrap_or_else(|_| "rust:1-slim".to_string());
+    let image = std::env::var("CDS_DOCKER_IMAGE").unwrap_or_else(|_| "rust:1".to_string());
     let cache_root = std::env::var_os("CDS_DOCKER_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest_dir.join("target/docker-cache"));
