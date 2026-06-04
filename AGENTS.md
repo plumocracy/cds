@@ -33,7 +33,7 @@ user's current shell.
 Prefer stable, well-maintained crates:
 
 - CLI parsing: `clap`
-- SQLite: `rusqlite`
+- SQLite: `sqlx` with SQLite
 - Serialization: `serde`, `serde_json`
 - Error handling: `color_eyre` for binaries, `thiserror` for reusable library errors
 - Filesystem walking: `ignore` or `walkdir`; prefer `ignore` because it respects common
@@ -53,6 +53,8 @@ For embeddings, prefer an implementation path that keeps the tool locally usable
 ## Suggested Architecture
 
 Keep the code split between a thin binary and testable library modules.
+The CLI and application pipeline are async end to end; use `tokio` for the binary runtime
+and keep database access on SQLx async APIs.
 
 Suggested modules:
 
@@ -69,6 +71,7 @@ Keep business logic out of `main.rs`.
 ## SQLite Guidance
 
 SQLite should be the durable source of indexed data.
+Schema changes belong in top-level SQLx migration files under `migrations/`.
 
 Track at least:
 

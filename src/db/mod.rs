@@ -1,12 +1,14 @@
 mod document;
 mod error;
-mod schema;
 mod vector;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use sqlx::migrate::Migrator;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::{Row, SqlitePool};
 
 pub use document::{
     DirectoryClassification, DirectoryTypeCount, DocumentKind, FileChunkMatch, IndexedDocument,
@@ -17,13 +19,15 @@ pub use vector::{decode_embedding, encode_embedding};
 
 pub type Result<T> = std::result::Result<T, DbError>;
 
-#[derive(Debug)]
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+#[derive(Debug, Clone)]
 pub struct Database {
-    connection: Connection,
+    pool: SqlitePool,
 }
 
 impl Database {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| DbError::CreateDatabaseDir {
                 path: parent.to_path_buf(),
@@ -31,508 +35,229 @@ impl Database {
             })?;
         }
 
-        let connection = Connection::open(path).map_err(|source| DbError::OpenDatabase {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        schema::migrate(&connection).map_err(|source| DbError::Migrate {
-            source: Box::new(source),
-        })?;
-        Ok(Self { connection })
+        let pool = open_file_pool(path, true).await?;
+        migrate_pool(&pool).await?;
+        Ok(Self { pool })
     }
 
-    pub fn open_existing(path: &Path) -> Result<Self> {
+    pub async fn open_existing(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(DbError::MissingDatabase {
                 path: path.to_path_buf(),
             });
         }
 
-        let connection = Connection::open(path).map_err(|source| DbError::OpenDatabase {
-            path: path.to_path_buf(),
+        let pool = open_file_pool(path, false).await?;
+        migrate_pool(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    pub async fn open_in_memory() -> Result<Self> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .map_err(|source| DbError::OpenInMemory { source })?;
+        migrate_pool(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    pub async fn upsert_document(&self, document: &IndexedDocument) -> Result<()> {
+        sqlx::query(
+            "
+            INSERT INTO indexed_documents (
+                path,
+                name,
+                kind,
+                parent_path,
+                searchable_text,
+                embedding,
+                embedding_dim,
+                metadata_fingerprint,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                indexed_unix_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                name = excluded.name,
+                kind = excluded.kind,
+                parent_path = excluded.parent_path,
+                searchable_text = excluded.searchable_text,
+                embedding = excluded.embedding,
+                embedding_dim = excluded.embedding_dim,
+                metadata_fingerprint = excluded.metadata_fingerprint,
+                size_bytes = excluded.size_bytes,
+                created_unix_seconds = excluded.created_unix_seconds,
+                modified_unix_seconds = excluded.modified_unix_seconds,
+                accessed_unix_seconds = excluded.accessed_unix_seconds,
+                readonly = excluded.readonly,
+                indexed_unix_seconds = excluded.indexed_unix_seconds
+            ",
+        )
+        .bind(&document.path)
+        .bind(&document.name)
+        .bind(document.kind.as_str())
+        .bind(&document.parent_path)
+        .bind(&document.searchable_text)
+        .bind(encode_embedding(&document.embedding))
+        .bind(
+            i64::try_from(document.embedding.len())
+                .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
+        )
+        .bind(&document.metadata_fingerprint)
+        .bind(
+            i64::try_from(document.size_bytes)
+                .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+        )
+        .bind(document.created_unix_seconds)
+        .bind(document.modified_unix_seconds)
+        .bind(document.accessed_unix_seconds)
+        .bind(document.readonly)
+        .bind(document.indexed_unix_seconds)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| DbError::UpsertDocument {
+            path: document.path.clone(),
             source,
         })?;
-        schema::migrate(&connection).map_err(|source| DbError::Migrate {
-            source: Box::new(source),
-        })?;
-        Ok(Self { connection })
-    }
-
-    pub fn open_in_memory() -> Result<Self> {
-        let connection =
-            Connection::open_in_memory().map_err(|source| DbError::OpenInMemory { source })?;
-        schema::migrate(&connection).map_err(|source| DbError::Migrate {
-            source: Box::new(source),
-        })?;
-        Ok(Self { connection })
-    }
-
-    pub fn upsert_document(&self, document: &IndexedDocument) -> Result<()> {
-        self.connection
-            .execute(
-                "
-                INSERT INTO indexed_documents (
-                    path,
-                    name,
-                    kind,
-                    parent_path,
-                    searchable_text,
-                    embedding,
-                    embedding_dim,
-                    metadata_fingerprint,
-                    size_bytes,
-                    created_unix_seconds,
-                    modified_unix_seconds,
-                    accessed_unix_seconds,
-                    readonly,
-                    indexed_unix_seconds
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-                ON CONFLICT(path) DO UPDATE SET
-                    name = excluded.name,
-                    kind = excluded.kind,
-                    parent_path = excluded.parent_path,
-                    searchable_text = excluded.searchable_text,
-                    embedding = excluded.embedding,
-                    embedding_dim = excluded.embedding_dim,
-                    metadata_fingerprint = excluded.metadata_fingerprint,
-                    size_bytes = excluded.size_bytes,
-                    created_unix_seconds = excluded.created_unix_seconds,
-                    modified_unix_seconds = excluded.modified_unix_seconds,
-                    accessed_unix_seconds = excluded.accessed_unix_seconds,
-                    readonly = excluded.readonly,
-                    indexed_unix_seconds = excluded.indexed_unix_seconds
-                ",
-                params![
-                    document.path,
-                    document.name,
-                    document.kind.as_str(),
-                    document.parent_path,
-                    document.searchable_text,
-                    encode_embedding(&document.embedding),
-                    i64::try_from(document.embedding.len())
-                        .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
-                    document.metadata_fingerprint,
-                    i64::try_from(document.size_bytes)
-                        .map_err(|source| DbError::MetadataSizeOverflow { source })?,
-                    document.created_unix_seconds,
-                    document.modified_unix_seconds,
-                    document.accessed_unix_seconds,
-                    document.readonly,
-                    document.indexed_unix_seconds,
-                ],
-            )
-            .map_err(|source| DbError::UpsertDocument {
-                path: document.path.clone(),
-                source,
-            })?;
 
         Ok(())
     }
 
-    pub fn upsert_file(&self, file: &IndexedFile) -> Result<()> {
-        self.connection
-            .execute(
-                "
-                INSERT INTO indexed_files (
-                    path,
-                    directory_path,
-                    name,
-                    extension,
-                    size_bytes,
-                    created_unix_seconds,
-                    modified_unix_seconds,
-                    accessed_unix_seconds,
-                    readonly,
-                    content_fingerprint,
-                    indexed_unix_seconds
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                ON CONFLICT(path) DO UPDATE SET
-                    directory_path = excluded.directory_path,
-                    name = excluded.name,
-                    extension = excluded.extension,
-                    size_bytes = excluded.size_bytes,
-                    created_unix_seconds = excluded.created_unix_seconds,
-                    modified_unix_seconds = excluded.modified_unix_seconds,
-                    accessed_unix_seconds = excluded.accessed_unix_seconds,
-                    readonly = excluded.readonly,
-                    content_fingerprint = excluded.content_fingerprint,
-                    indexed_unix_seconds = excluded.indexed_unix_seconds
-                ",
-                params![
-                    file.path,
-                    file.directory_path,
-                    file.name,
-                    file.extension,
-                    i64::try_from(file.size_bytes)
-                        .map_err(|source| DbError::MetadataSizeOverflow { source })?,
-                    file.created_unix_seconds,
-                    file.modified_unix_seconds,
-                    file.accessed_unix_seconds,
-                    file.readonly,
-                    file.content_fingerprint,
-                    file.indexed_unix_seconds,
-                ],
-            )
-            .map_err(|source| DbError::UpsertFile {
-                path: file.path.clone(),
-                source,
-            })?;
+    pub async fn upsert_file(&self, file: &IndexedFile) -> Result<()> {
+        sqlx::query(
+            "
+            INSERT INTO indexed_files (
+                path,
+                directory_path,
+                name,
+                extension,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                content_fingerprint,
+                indexed_unix_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                directory_path = excluded.directory_path,
+                name = excluded.name,
+                extension = excluded.extension,
+                size_bytes = excluded.size_bytes,
+                created_unix_seconds = excluded.created_unix_seconds,
+                modified_unix_seconds = excluded.modified_unix_seconds,
+                accessed_unix_seconds = excluded.accessed_unix_seconds,
+                readonly = excluded.readonly,
+                content_fingerprint = excluded.content_fingerprint,
+                indexed_unix_seconds = excluded.indexed_unix_seconds
+            ",
+        )
+        .bind(&file.path)
+        .bind(&file.directory_path)
+        .bind(&file.name)
+        .bind(&file.extension)
+        .bind(
+            i64::try_from(file.size_bytes)
+                .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+        )
+        .bind(file.created_unix_seconds)
+        .bind(file.modified_unix_seconds)
+        .bind(file.accessed_unix_seconds)
+        .bind(file.readonly)
+        .bind(&file.content_fingerprint)
+        .bind(file.indexed_unix_seconds)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| DbError::UpsertFile {
+            path: file.path.clone(),
+            source,
+        })?;
 
         Ok(())
     }
 
-    pub fn replace_file_chunks(&self, file_path: &str, chunks: &[IndexedFileChunk]) -> Result<()> {
-        self.connection
-            .execute(
-                "DELETE FROM indexed_file_chunks WHERE file_path = ?1",
-                [file_path],
-            )
+    pub async fn replace_file_chunks(
+        &self,
+        file_path: &str,
+        chunks: &[IndexedFileChunk],
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM indexed_file_chunks WHERE file_path = ?")
+            .bind(file_path)
+            .execute(&self.pool)
+            .await
             .map_err(|source| DbError::DeleteFileChunks {
                 path: file_path.to_string(),
                 source,
             })?;
 
         for chunk in chunks {
-            self.connection
-                .execute(
-                    "
-                    INSERT INTO indexed_file_chunks (
-                        file_path,
-                        directory_path,
-                        chunk_index,
-                        content,
-                        embedding,
-                        embedding_dim,
-                        start_byte,
-                        end_byte,
-                        indexed_unix_seconds
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                    ",
-                    params![
-                        chunk.file_path,
-                        chunk.directory_path,
-                        i64::from(chunk.chunk_index),
-                        chunk.content,
-                        encode_embedding(&chunk.embedding),
-                        i64::try_from(chunk.embedding.len())
-                            .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
-                        i64::try_from(chunk.start_byte)
-                            .map_err(|source| DbError::MetadataSizeOverflow { source })?,
-                        i64::try_from(chunk.end_byte)
-                            .map_err(|source| DbError::MetadataSizeOverflow { source })?,
-                        chunk.indexed_unix_seconds,
-                    ],
-                )
-                .map_err(|source| DbError::InsertFileChunk {
-                    path: chunk.file_path.clone(),
-                    chunk_index: chunk.chunk_index,
-                    source,
-                })?;
+            sqlx::query(
+                "
+                INSERT INTO indexed_file_chunks (
+                    file_path,
+                    directory_path,
+                    chunk_index,
+                    content,
+                    embedding,
+                    embedding_dim,
+                    start_byte,
+                    end_byte,
+                    indexed_unix_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ",
+            )
+            .bind(&chunk.file_path)
+            .bind(&chunk.directory_path)
+            .bind(i64::from(chunk.chunk_index))
+            .bind(&chunk.content)
+            .bind(encode_embedding(&chunk.embedding))
+            .bind(
+                i64::try_from(chunk.embedding.len())
+                    .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?,
+            )
+            .bind(
+                i64::try_from(chunk.start_byte)
+                    .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+            )
+            .bind(
+                i64::try_from(chunk.end_byte)
+                    .map_err(|source| DbError::MetadataSizeOverflow { source })?,
+            )
+            .bind(chunk.indexed_unix_seconds)
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::InsertFileChunk {
+                path: chunk.file_path.clone(),
+                chunk_index: chunk.chunk_index,
+                source,
+            })?;
         }
 
         Ok(())
     }
 
-    pub fn replace_directory_classifications(
+    pub async fn replace_directory_classifications(
         &self,
         directory_path: &str,
         classifications: &[DirectoryClassification],
     ) -> Result<()> {
-        self.connection
-            .execute(
-                "DELETE FROM directory_classifications WHERE directory_path = ?1",
-                [directory_path],
-            )
+        sqlx::query("DELETE FROM directory_classifications WHERE directory_path = ?")
+            .bind(directory_path)
+            .execute(&self.pool)
+            .await
             .map_err(|source| DbError::ReplaceDirectoryClassifications {
                 path: directory_path.to_string(),
                 source,
             })?;
 
         for classification in classifications {
-            self.connection
-                .execute(
-                    "
-                    INSERT INTO directory_classifications (
-                        directory_path,
-                        label,
-                        confidence,
-                        detector,
-                        evidence_path,
-                        evidence_summary,
-                        detected_unix_seconds
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                    ",
-                    params![
-                        classification.directory_path,
-                        classification.label,
-                        classification.confidence,
-                        classification.detector,
-                        classification.evidence_path,
-                        classification.evidence_summary,
-                        classification.detected_unix_seconds,
-                    ],
-                )
-                .map_err(|source| DbError::InsertDirectoryClassification {
-                    path: classification.directory_path.clone(),
-                    label: classification.label.clone(),
-                    source,
-                })?;
-        }
-
-        Ok(())
-    }
-
-    pub fn delete_path_tree(&self, path: &str) -> Result<()> {
-        let path_len = i64::try_from(path.len())
-            .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?;
-
-        self.connection
-            .execute(
+            sqlx::query(
                 "
-                DELETE FROM directory_classifications
-                WHERE directory_path = ?1
-                    OR (
-                        length(directory_path) > ?2
-                        AND substr(directory_path, 1, ?2) = ?1
-                        AND substr(directory_path, ?2 + 1, 1) = '/'
-                    )
-                ",
-                params![path, path_len],
-            )
-            .map_err(|source| DbError::DeletePathTree {
-                path: path.to_string(),
-                source,
-            })?;
-
-        self.connection
-            .execute(
-                "
-                DELETE FROM indexed_file_chunks
-                WHERE file_path = ?1
-                    OR directory_path = ?1
-                    OR (
-                        length(file_path) > ?2
-                        AND substr(file_path, 1, ?2) = ?1
-                        AND substr(file_path, ?2 + 1, 1) = '/'
-                    )
-                    OR (
-                        length(directory_path) > ?2
-                        AND substr(directory_path, 1, ?2) = ?1
-                        AND substr(directory_path, ?2 + 1, 1) = '/'
-                    )
-                ",
-                params![path, path_len],
-            )
-            .map_err(|source| DbError::DeletePathTree {
-                path: path.to_string(),
-                source,
-            })?;
-
-        self.connection
-            .execute(
-                "
-                DELETE FROM indexed_files
-                WHERE path = ?1
-                    OR directory_path = ?1
-                    OR (
-                        length(path) > ?2
-                        AND substr(path, 1, ?2) = ?1
-                        AND substr(path, ?2 + 1, 1) = '/'
-                    )
-                    OR (
-                        length(directory_path) > ?2
-                        AND substr(directory_path, 1, ?2) = ?1
-                        AND substr(directory_path, ?2 + 1, 1) = '/'
-                    )
-                ",
-                params![path, path_len],
-            )
-            .map_err(|source| DbError::DeletePathTree {
-                path: path.to_string(),
-                source,
-            })?;
-
-        self.connection
-            .execute(
-                "
-                DELETE FROM indexed_documents
-                WHERE path = ?1
-                    OR (
-                        length(path) > ?2
-                        AND substr(path, 1, ?2) = ?1
-                        AND substr(path, ?2 + 1, 1) = '/'
-                    )
-                ",
-                params![path, path_len],
-            )
-            .map_err(|source| DbError::DeletePathTree {
-                path: path.to_string(),
-                source,
-            })?;
-
-        Ok(())
-    }
-
-    pub fn reset(&self) -> Result<()> {
-        self.connection
-            .execute_batch(
-                "
-                BEGIN;
-                DELETE FROM directory_classifications;
-                DELETE FROM indexed_file_chunks;
-                DELETE FROM indexed_files;
-                DELETE FROM indexed_documents;
-                COMMIT;
-                ",
-            )
-            .map_err(|source| DbError::ResetDatabase { source })?;
-
-        Ok(())
-    }
-
-    pub fn document_count(&self) -> Result<u64> {
-        let count: i64 = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM indexed_documents", [], |row| {
-                row.get(0)
-            })
-            .map_err(|source| DbError::CountDocuments { source })?;
-        u64::try_from(count).map_err(|source| DbError::NegativeDocumentCount { source })
-    }
-
-    pub fn get_document(&self, path: &str) -> Result<Option<IndexedDocument>> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "
-                SELECT
-                    path,
-                    name,
-                    kind,
-                    parent_path,
-                    searchable_text,
-                    embedding,
-                    metadata_fingerprint,
-                    size_bytes,
-                    created_unix_seconds,
-                    modified_unix_seconds,
-                    accessed_unix_seconds,
-                    readonly,
-                    indexed_unix_seconds
-                FROM indexed_documents
-                WHERE path = ?1
-                ",
-            )
-            .map_err(|source| DbError::PrepareDocumentLookup { source })?;
-
-        let mut rows = statement
-            .query_map([path], decode_document_row)
-            .map_err(|source| DbError::LookupDocument {
-                path: path.to_string(),
-                source,
-            })?;
-
-        rows.next()
-            .transpose()
-            .map_err(|source| DbError::DecodeDocument {
-                path: path.to_string(),
-                source,
-            })
-    }
-
-    pub fn directory_documents(&self) -> Result<Vec<IndexedDocument>> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "
-                SELECT
-                    path,
-                    name,
-                    kind,
-                    parent_path,
-                    searchable_text,
-                    embedding,
-                    metadata_fingerprint,
-                    size_bytes,
-                    created_unix_seconds,
-                    modified_unix_seconds,
-                    accessed_unix_seconds,
-                    readonly,
-                    indexed_unix_seconds
-                FROM indexed_documents
-                WHERE kind = 'directory'
-                ",
-            )
-            .map_err(|source| DbError::PrepareDirectoryDocumentScan { source })?;
-
-        let rows = statement
-            .query_map([], decode_document_row)
-            .map_err(|source| DbError::ReadDirectoryDocuments { source })?;
-
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|source| DbError::ReadDirectoryDocuments { source })
-    }
-
-    pub fn file_chunk_matches(&self) -> Result<Vec<FileChunkMatch>> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "
-                SELECT
-                    chunk.file_path,
-                    file.name,
-                    chunk.directory_path,
-                    chunk.content,
-                    chunk.embedding,
-                    file.modified_unix_seconds,
-                    directory.modified_unix_seconds
-                FROM indexed_file_chunks AS chunk
-                INNER JOIN indexed_files AS file
-                    ON file.path = chunk.file_path
-                INNER JOIN indexed_documents AS directory
-                    ON directory.path = chunk.directory_path
-                WHERE directory.kind = 'directory'
-                ",
-            )
-            .map_err(|source| DbError::ReadFileChunks { source })?;
-
-        let rows = statement
-            .query_map([], |row| {
-                let embedding: Vec<u8> = row.get(4)?;
-                Ok(FileChunkMatch {
-                    file_path: row.get(0)?,
-                    file_name: row.get(1)?,
-                    directory_path: row.get(2)?,
-                    content: row.get(3)?,
-                    embedding: decode_embedding(&embedding).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Blob,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                err.to_string(),
-                            )),
-                        )
-                    })?,
-                    file_modified_unix_seconds: row.get(5)?,
-                    directory_modified_unix_seconds: row.get(6)?,
-                })
-            })
-            .map_err(|source| DbError::ReadFileChunks { source })?;
-
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|source| DbError::ReadFileChunks { source })
-    }
-
-    pub fn directory_classifications(
-        &self,
-        directory_path: &str,
-    ) -> Result<Vec<DirectoryClassification>> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "
-                SELECT
+                INSERT INTO directory_classifications (
                     directory_path,
                     label,
                     confidence,
@@ -540,69 +265,336 @@ impl Database {
                     evidence_path,
                     evidence_summary,
                     detected_unix_seconds
-                FROM directory_classifications
-                WHERE directory_path = ?1
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
             )
-            .map_err(|source| DbError::ReadDirectoryClassifications { source })?;
+            .bind(&classification.directory_path)
+            .bind(&classification.label)
+            .bind(f64::from(classification.confidence))
+            .bind(&classification.detector)
+            .bind(&classification.evidence_path)
+            .bind(&classification.evidence_summary)
+            .bind(classification.detected_unix_seconds)
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::InsertDirectoryClassification {
+                path: classification.directory_path.clone(),
+                label: classification.label.clone(),
+                source,
+            })?;
+        }
 
-        let rows = statement
-            .query_map([directory_path], decode_classification_row)
-            .map_err(|source| DbError::ReadDirectoryClassifications { source })?;
+        Ok(())
+    }
 
-        rows.collect::<std::result::Result<Vec<_>, _>>()
+    pub async fn delete_path_tree(&self, path: &str) -> Result<()> {
+        let path_len = i64::try_from(path.len())
+            .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?;
+
+        sqlx::query(
+            "
+            DELETE FROM directory_classifications
+            WHERE directory_path = ?
+                OR (
+                    length(directory_path) > ?
+                    AND substr(directory_path, 1, ?) = ?
+                    AND substr(directory_path, ? + 1, 1) = '/'
+                )
+            ",
+        )
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| DbError::DeletePathTree {
+            path: path.to_string(),
+            source,
+        })?;
+
+        sqlx::query(
+            "
+            DELETE FROM indexed_file_chunks
+            WHERE file_path = ?
+                OR directory_path = ?
+                OR (
+                    length(file_path) > ?
+                    AND substr(file_path, 1, ?) = ?
+                    AND substr(file_path, ? + 1, 1) = '/'
+                )
+                OR (
+                    length(directory_path) > ?
+                    AND substr(directory_path, 1, ?) = ?
+                    AND substr(directory_path, ? + 1, 1) = '/'
+                )
+            ",
+        )
+        .bind(path)
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| DbError::DeletePathTree {
+            path: path.to_string(),
+            source,
+        })?;
+
+        sqlx::query(
+            "
+            DELETE FROM indexed_files
+            WHERE path = ?
+                OR directory_path = ?
+                OR (
+                    length(path) > ?
+                    AND substr(path, 1, ?) = ?
+                    AND substr(path, ? + 1, 1) = '/'
+                )
+                OR (
+                    length(directory_path) > ?
+                    AND substr(directory_path, 1, ?) = ?
+                    AND substr(directory_path, ? + 1, 1) = '/'
+                )
+            ",
+        )
+        .bind(path)
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| DbError::DeletePathTree {
+            path: path.to_string(),
+            source,
+        })?;
+
+        sqlx::query(
+            "
+            DELETE FROM indexed_documents
+            WHERE path = ?
+                OR (
+                    length(path) > ?
+                    AND substr(path, 1, ?) = ?
+                    AND substr(path, ? + 1, 1) = '/'
+                )
+            ",
+        )
+        .bind(path)
+        .bind(path_len)
+        .bind(path_len)
+        .bind(path)
+        .bind(path_len)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| DbError::DeletePathTree {
+            path: path.to_string(),
+            source,
+        })?;
+
+        Ok(())
+    }
+
+    pub async fn reset(&self) -> Result<()> {
+        sqlx::query("DELETE FROM directory_classifications")
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+        sqlx::query("DELETE FROM indexed_file_chunks")
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+        sqlx::query("DELETE FROM indexed_files")
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+        sqlx::query("DELETE FROM indexed_documents")
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+
+        Ok(())
+    }
+
+    pub async fn document_count(&self) -> Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM indexed_documents")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|source| DbError::CountDocuments { source })?;
+        u64::try_from(count).map_err(|source| DbError::NegativeDocumentCount { source })
+    }
+
+    pub async fn get_document(&self, path: &str) -> Result<Option<IndexedDocument>> {
+        let row = sqlx::query(
+            "
+            SELECT
+                path,
+                name,
+                kind,
+                parent_path,
+                searchable_text,
+                embedding,
+                metadata_fingerprint,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                indexed_unix_seconds
+            FROM indexed_documents
+            WHERE path = ?
+            ",
+        )
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|source| DbError::LookupDocument {
+            path: path.to_string(),
+            source,
+        })?;
+
+        row.map(decode_document_row)
+            .transpose()
+            .map_err(|source| DbError::LookupDocument {
+                path: path.to_string(),
+                source,
+            })
+    }
+
+    pub async fn directory_documents(&self) -> Result<Vec<IndexedDocument>> {
+        let rows = sqlx::query(
+            "
+            SELECT
+                path,
+                name,
+                kind,
+                parent_path,
+                searchable_text,
+                embedding,
+                metadata_fingerprint,
+                size_bytes,
+                created_unix_seconds,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                readonly,
+                indexed_unix_seconds
+            FROM indexed_documents
+            WHERE kind = 'directory'
+            ",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadDirectoryDocuments { source })?;
+
+        rows.into_iter()
+            .map(decode_document_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| DbError::ReadDirectoryDocuments { source })
+    }
+
+    pub async fn file_chunk_matches(&self) -> Result<Vec<FileChunkMatch>> {
+        let rows = sqlx::query(
+            "
+            SELECT
+                chunk.file_path,
+                file.name AS file_name,
+                chunk.directory_path,
+                chunk.content,
+                chunk.embedding,
+                file.modified_unix_seconds AS file_modified_unix_seconds,
+                directory.modified_unix_seconds AS directory_modified_unix_seconds
+            FROM indexed_file_chunks AS chunk
+            INNER JOIN indexed_files AS file
+                ON file.path = chunk.file_path
+            INNER JOIN indexed_documents AS directory
+                ON directory.path = chunk.directory_path
+            WHERE directory.kind = 'directory'
+            ",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadFileChunks { source })?;
+
+        rows.into_iter()
+            .map(decode_file_chunk_match_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| DbError::ReadFileChunks { source })
+    }
+
+    pub async fn directory_classifications(
+        &self,
+        directory_path: &str,
+    ) -> Result<Vec<DirectoryClassification>> {
+        let rows = sqlx::query(
+            "
+            SELECT
+                directory_path,
+                label,
+                confidence,
+                detector,
+                evidence_path,
+                evidence_summary,
+                detected_unix_seconds
+            FROM directory_classifications
+            WHERE directory_path = ?
+            ",
+        )
+        .bind(directory_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadDirectoryClassifications { source })?;
+
+        rows.into_iter()
+            .map(decode_classification_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|source| DbError::ReadDirectoryClassifications { source })
     }
 
-    pub fn ancestor_classifications(
+    pub async fn ancestor_classifications(
         &self,
         directory_path: &str,
     ) -> Result<Vec<DirectoryClassification>> {
         let mut classifications = Vec::new();
-        for ancestor in self.indexed_ancestors(directory_path)? {
-            classifications.extend(self.directory_classifications(&ancestor)?);
+        for ancestor in self.indexed_ancestors(directory_path).await? {
+            classifications.extend(self.directory_classifications(&ancestor).await?);
         }
         Ok(classifications)
     }
 
-    pub fn directory_type_counts(&self) -> Result<Vec<DirectoryTypeCount>> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "
-                SELECT label, COUNT(DISTINCT directory_path) AS directory_count
-                FROM directory_classifications
-                GROUP BY label
-                ORDER BY directory_count DESC, label ASC
-                ",
-            )
-            .map_err(|source| DbError::ReadDirectoryTypeCounts { source })?;
+    pub async fn directory_type_counts(&self) -> Result<Vec<DirectoryTypeCount>> {
+        let rows = sqlx::query(
+            "
+            SELECT label, COUNT(DISTINCT directory_path) AS directory_count
+            FROM directory_classifications
+            GROUP BY label
+            ORDER BY directory_count DESC, label ASC
+            ",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadDirectoryTypeCounts { source })?;
 
-        let rows = statement
-            .query_map([], |row| {
-                let count: i64 = row.get(1)?;
-                Ok(DirectoryTypeCount {
-                    label: row.get(0)?,
-                    count: u64::try_from(count).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Integer,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                err.to_string(),
-                            )),
-                        )
-                    })?,
-                })
-            })
-            .map_err(|source| DbError::ReadDirectoryTypeCounts { source })?;
-
-        rows.collect::<std::result::Result<Vec<_>, _>>()
+        rows.into_iter()
+            .map(decode_directory_type_count_row)
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|source| DbError::ReadDirectoryTypeCounts { source })
     }
 
-    pub fn general_indexed_directory(&self, path: &str) -> Result<String> {
-        let ancestors = self.indexed_ancestors(path)?;
+    pub async fn general_indexed_directory(&self, path: &str) -> Result<String> {
+        let ancestors = self.indexed_ancestors(path).await?;
 
         if ancestors.len() >= 2 {
             return Ok(ancestors[ancestors.len() - 2].clone());
@@ -614,28 +606,26 @@ impl Database {
             .unwrap_or_else(|| path.to_string()))
     }
 
-    pub fn indexed_ancestors(&self, path: &str) -> Result<Vec<String>> {
+    pub async fn indexed_ancestors(&self, path: &str) -> Result<Vec<String>> {
         let mut current = Path::new(path);
         let mut ancestors = Vec::new();
 
         loop {
             let current_path = current.to_string_lossy();
-            let exists = self
-                .connection
-                .query_row(
-                    "
-                    SELECT path
-                    FROM indexed_documents
-                    WHERE path = ?1 AND kind = 'directory'
-                    ",
-                    [current_path.as_ref()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|source| DbError::LookupDocument {
-                    path: current_path.into_owned(),
-                    source,
-                })?;
+            let exists: Option<String> = sqlx::query_scalar(
+                "
+                SELECT path
+                FROM indexed_documents
+                WHERE path = ? AND kind = 'directory'
+                ",
+            )
+            .bind(current_path.as_ref())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|source| DbError::LookupDocument {
+                path: current_path.to_string(),
+                source,
+            })?;
 
             if let Some(path) = exists {
                 ancestors.push(path);
@@ -651,54 +641,175 @@ impl Database {
     }
 }
 
-fn decode_classification_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DirectoryClassification> {
+async fn open_file_pool(path: &Path, create_if_missing: bool) -> Result<SqlitePool> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(create_if_missing);
+
+    SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .map_err(|source| DbError::OpenDatabase {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+async fn migrate_pool(pool: &SqlitePool) -> Result<()> {
+    prepare_legacy_schema(pool).await?;
+    MIGRATOR
+        .run(pool)
+        .await
+        .map_err(|source| DbError::Migrate { source })?;
+    sqlx::query("PRAGMA user_version = 4")
+        .execute(pool)
+        .await
+        .map_err(|source| DbError::PrepareLegacyMigration { source })?;
+    Ok(())
+}
+
+async fn prepare_legacy_schema(pool: &SqlitePool) -> Result<()> {
+    let has_legacy_documents: Option<i64> = sqlx::query_scalar(
+        "
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'indexed_documents'
+        ",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|source| DbError::PrepareLegacyMigration { source })?;
+
+    if has_legacy_documents.is_none() {
+        return Ok(());
+    }
+
+    let rows = sqlx::query("PRAGMA table_info(indexed_documents)")
+        .fetch_all(pool)
+        .await
+        .map_err(|source| DbError::PrepareLegacyMigration { source })?;
+    let columns = rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<std::result::Result<HashSet<_>, _>>()
+        .map_err(|source| DbError::PrepareLegacyMigration { source })?;
+
+    add_legacy_column_if_missing(
+        pool,
+        &columns,
+        "name",
+        "ALTER TABLE indexed_documents ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    add_legacy_column_if_missing(
+        pool,
+        &columns,
+        "size_bytes",
+        "ALTER TABLE indexed_documents ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_legacy_column_if_missing(
+        pool,
+        &columns,
+        "created_unix_seconds",
+        "ALTER TABLE indexed_documents ADD COLUMN created_unix_seconds INTEGER",
+    )
+    .await?;
+    add_legacy_column_if_missing(
+        pool,
+        &columns,
+        "accessed_unix_seconds",
+        "ALTER TABLE indexed_documents ADD COLUMN accessed_unix_seconds INTEGER",
+    )
+    .await?;
+    add_legacy_column_if_missing(
+        pool,
+        &columns,
+        "readonly",
+        "ALTER TABLE indexed_documents ADD COLUMN readonly INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn add_legacy_column_if_missing(
+    pool: &SqlitePool,
+    columns: &HashSet<String>,
+    column: &str,
+    sql: &str,
+) -> Result<()> {
+    if columns.contains(column) {
+        return Ok(());
+    }
+
+    sqlx::query(sql)
+        .execute(pool)
+        .await
+        .map_err(|source| DbError::PrepareLegacyMigration { source })?;
+    Ok(())
+}
+
+fn decode_classification_row(
+    row: SqliteRow,
+) -> std::result::Result<DirectoryClassification, sqlx::Error> {
+    let confidence: f64 = row.try_get("confidence")?;
     Ok(DirectoryClassification {
-        directory_path: row.get(0)?,
-        label: row.get(1)?,
-        confidence: row.get(2)?,
-        detector: row.get(3)?,
-        evidence_path: row.get(4)?,
-        evidence_summary: row.get(5)?,
-        detected_unix_seconds: row.get(6)?,
+        directory_path: row.try_get("directory_path")?,
+        label: row.try_get("label")?,
+        confidence: confidence as f32,
+        detector: row.try_get("detector")?,
+        evidence_path: row.try_get("evidence_path")?,
+        evidence_summary: row.try_get("evidence_summary")?,
+        detected_unix_seconds: row.try_get("detected_unix_seconds")?,
     })
 }
 
-fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedDocument> {
-    let kind: String = row.get(2)?;
-    let embedding: Vec<u8> = row.get(5)?;
-    let size_bytes: i64 = row.get(7)?;
+fn decode_directory_type_count_row(
+    row: SqliteRow,
+) -> std::result::Result<DirectoryTypeCount, sqlx::Error> {
+    let count: i64 = row.try_get("directory_count")?;
+    Ok(DirectoryTypeCount {
+        label: row.try_get("label")?,
+        count: u64::try_from(count).map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+    })
+}
+
+fn decode_document_row(row: SqliteRow) -> std::result::Result<IndexedDocument, sqlx::Error> {
+    let path: String = row.try_get("path")?;
+    let kind: String = row.try_get("kind")?;
+    let embedding: Vec<u8> = row.try_get("embedding")?;
+    let size_bytes: i64 = row.try_get("size_bytes")?;
     Ok(IndexedDocument {
-        path: row.get(0)?,
-        name: row.get(1)?,
+        path,
+        name: row.try_get("name")?,
         kind: DocumentKind::from_db_value(&kind),
-        parent_path: row.get(3)?,
-        searchable_text: row.get(4)?,
-        embedding: decode_embedding(&embedding).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                5,
-                rusqlite::types::Type::Blob,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    err.to_string(),
-                )),
-            )
-        })?,
-        metadata_fingerprint: row.get(6)?,
-        size_bytes: u64::try_from(size_bytes).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
-                rusqlite::types::Type::Integer,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    err.to_string(),
-                )),
-            )
-        })?,
-        created_unix_seconds: row.get(8)?,
-        modified_unix_seconds: row.get(9)?,
-        accessed_unix_seconds: row.get(10)?,
-        readonly: row.get(11)?,
-        indexed_unix_seconds: row.get(12)?,
+        parent_path: row.try_get("parent_path")?,
+        searchable_text: row.try_get("searchable_text")?,
+        embedding: decode_embedding(&embedding)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        metadata_fingerprint: row.try_get("metadata_fingerprint")?,
+        size_bytes: u64::try_from(size_bytes).map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        created_unix_seconds: row.try_get("created_unix_seconds")?,
+        modified_unix_seconds: row.try_get("modified_unix_seconds")?,
+        accessed_unix_seconds: row.try_get("accessed_unix_seconds")?,
+        readonly: row.try_get("readonly")?,
+        indexed_unix_seconds: row.try_get("indexed_unix_seconds")?,
+    })
+}
+
+fn decode_file_chunk_match_row(row: SqliteRow) -> std::result::Result<FileChunkMatch, sqlx::Error> {
+    let embedding: Vec<u8> = row.try_get("embedding")?;
+    Ok(FileChunkMatch {
+        file_path: row.try_get("file_path")?,
+        file_name: row.try_get("file_name")?,
+        directory_path: row.try_get("directory_path")?,
+        content: row.try_get("content")?,
+        embedding: decode_embedding(&embedding)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        file_modified_unix_seconds: row.try_get("file_modified_unix_seconds")?,
+        directory_modified_unix_seconds: row.try_get("directory_modified_unix_seconds")?,
     })
 }
 
@@ -706,9 +817,9 @@ fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedDocum
 mod tests {
     use super::*;
 
-    #[test]
-    fn upserts_and_reads_document() {
-        let db = Database::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn upserts_and_reads_document() {
+        let db = Database::open_in_memory().await.unwrap();
         let document = IndexedDocument {
             path: "/tmp/project".to_string(),
             name: "project".to_string(),
@@ -725,41 +836,48 @@ mod tests {
             indexed_unix_seconds: 34,
         };
 
-        db.upsert_document(&document).unwrap();
+        db.upsert_document(&document).await.unwrap();
 
-        assert_eq!(db.document_count().unwrap(), 1);
-        assert_eq!(db.get_document("/tmp/project").unwrap(), Some(document));
+        assert_eq!(db.document_count().await.unwrap(), 1);
+        assert_eq!(
+            db.get_document("/tmp/project").await.unwrap(),
+            Some(document)
+        );
     }
 
-    #[test]
-    fn migrates_v1_database_to_metadata_schema() {
+    #[tokio::test]
+    async fn migrates_v1_database_to_metadata_schema() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cds.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "
-                CREATE TABLE indexed_documents (
-                    path TEXT PRIMARY KEY NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('directory', 'file')),
-                    parent_path TEXT,
-                    searchable_text TEXT NOT NULL,
-                    embedding BLOB NOT NULL,
-                    embedding_dim INTEGER NOT NULL,
-                    metadata_fingerprint TEXT NOT NULL,
-                    modified_unix_seconds INTEGER NOT NULL,
-                    indexed_unix_seconds INTEGER NOT NULL
-                );
-                PRAGMA user_version = 1;
-                ",
+        let pool = open_file_pool(&path, true).await.unwrap();
+        sqlx::query(
+            "
+            CREATE TABLE indexed_documents (
+                path TEXT PRIMARY KEY NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('directory', 'file')),
+                parent_path TEXT,
+                searchable_text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_dim INTEGER NOT NULL,
+                metadata_fingerprint TEXT NOT NULL,
+                modified_unix_seconds INTEGER NOT NULL,
+                indexed_unix_seconds INTEGER NOT NULL
             )
+            ",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA user_version = 1")
+            .execute(&pool)
+            .await
             .unwrap();
-        drop(connection);
+        pool.close().await;
 
-        let db = Database::open(&path).unwrap();
-        let version: i64 = db
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+        let db = Database::open(&path).await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
+            .await
             .unwrap();
 
         assert_eq!(version, 4);
@@ -778,9 +896,10 @@ mod tests {
             readonly: true,
             indexed_unix_seconds: 34,
         })
+        .await
         .unwrap();
 
-        let document = db.get_document("/tmp/project").unwrap().unwrap();
+        let document = db.get_document("/tmp/project").await.unwrap().unwrap();
         assert_eq!(document.name, "project");
         assert_eq!(document.size_bytes, 4096);
         assert_eq!(document.created_unix_seconds, Some(10));
@@ -788,9 +907,9 @@ mod tests {
         assert!(document.readonly);
     }
 
-    #[test]
-    fn replaces_and_reads_directory_classifications() {
-        let db = Database::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn replaces_and_reads_directory_classifications() {
+        let db = Database::open_in_memory().await.unwrap();
         let classification = DirectoryClassification {
             directory_path: "/tmp/project".to_string(),
             label: "rust project".to_string(),
@@ -802,24 +921,27 @@ mod tests {
         };
 
         db.replace_directory_classifications("/tmp/project", std::slice::from_ref(&classification))
+            .await
             .unwrap();
         assert_eq!(
-            db.directory_classifications("/tmp/project").unwrap(),
+            db.directory_classifications("/tmp/project").await.unwrap(),
             vec![classification]
         );
 
         db.replace_directory_classifications("/tmp/project", &[])
+            .await
             .unwrap();
         assert!(
             db.directory_classifications("/tmp/project")
+                .await
                 .unwrap()
                 .is_empty()
         );
     }
 
-    #[test]
-    fn counts_distinct_directories_by_type() {
-        let db = Database::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn counts_distinct_directories_by_type() {
+        let db = Database::open_in_memory().await.unwrap();
         let rust_one = DirectoryClassification {
             directory_path: "/tmp/one".to_string(),
             label: "rust project".to_string(),
@@ -849,14 +971,17 @@ mod tests {
         };
 
         db.replace_directory_classifications("/tmp/one", &[rust_one])
+            .await
             .unwrap();
         db.replace_directory_classifications("/tmp/two", &[rust_two])
+            .await
             .unwrap();
         db.replace_directory_classifications("/tmp/three", &[chrome])
+            .await
             .unwrap();
 
         assert_eq!(
-            db.directory_type_counts().unwrap(),
+            db.directory_type_counts().await.unwrap(),
             vec![
                 DirectoryTypeCount {
                     label: "rust project".to_string(),
@@ -870,9 +995,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reset_clears_indexed_content() {
-        let db = Database::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn reset_clears_indexed_content() {
+        let db = Database::open_in_memory().await.unwrap();
         db.upsert_document(&IndexedDocument {
             path: "/tmp/project".to_string(),
             name: "project".to_string(),
@@ -888,6 +1013,7 @@ mod tests {
             readonly: false,
             indexed_unix_seconds: 34,
         })
+        .await
         .unwrap();
         db.replace_directory_classifications(
             "/tmp/project",
@@ -901,11 +1027,12 @@ mod tests {
                 detected_unix_seconds: 100,
             }],
         )
+        .await
         .unwrap();
 
-        db.reset().unwrap();
+        db.reset().await.unwrap();
 
-        assert_eq!(db.document_count().unwrap(), 0);
-        assert!(db.directory_type_counts().unwrap().is_empty());
+        assert_eq!(db.document_count().await.unwrap(), 0);
+        assert!(db.directory_type_counts().await.unwrap().is_empty());
     }
 }
