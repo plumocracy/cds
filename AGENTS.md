@@ -33,7 +33,7 @@ user's current shell.
 Prefer stable, well-maintained crates:
 
 - CLI parsing: `clap`
-- SQLite: `sqlx` with SQLite
+- SQLite: `rusqlite`
 - Serialization: `serde`, `serde_json`
 - Error handling: `color_eyre` for binaries, `thiserror` for reusable library errors
 - Filesystem walking: `ignore` or `walkdir`; prefer `ignore` because it respects common
@@ -92,21 +92,26 @@ Embedding storage options may include:
 If using a SQLite extension, preserve a fallback or clear setup error so the CLI does not
 fail opaquely.
 
-## Command Shape
+## Current Command Shape
 
-Likely commands:
+All explicit `cds` commands should be long flags so they cannot be confused with normal
+`cd` operands. Do not add bare subcommands such as `cds init`; those should remain valid
+directory names when routed through the shell integration.
+
+Current user-facing commands:
 
 ```sh
-cds init
-cds index [PATH]
-cds search QUERY...
-cds go QUERY...
-cds explain QUERY...
-cds doctor
+cds --init
+cds --index [PATH...]
+cds --search QUERY...
+cds --dir-type-count
+cds --reset
+cds --shell-init [bash|zsh]
 ```
 
-Shell integration should make the common path concise. For example, the installed shell
-function may call `cds go "$@"` and `cd` to the emitted path.
+The shell integration makes the common path concise. Plain invocations such as
+`cds Projects` should preserve `cd` behavior unless they are clearly semantic searches.
+The hidden shell-machine mode currently uses `--cds-emit`.
 
 The Rust binary should not print human-oriented decoration in machine-readable shell
 integration mode. Keep stdout parseable and put diagnostics on stderr.
@@ -166,9 +171,23 @@ Add tests for:
 - indexing change detection
 - ranking behavior with deterministic fake embeddings
 - shell integration output
+- Docker-backed `cd` equivalence for Bash behavior
 
 Do not make tests depend on downloading or running the real embedding model unless they
 are explicitly marked as slow/integration tests. Use a fake embedder for normal tests.
+
+The Docker equivalence test runs the project inside a Rust container and compares `cds`
+against Bash's built-in `cd` for status, stdout, stderr, `PWD`, `OLDPWD`, and physical path.
+Keep these details in mind when editing it:
+
+- CI currently uses `CDS_DOCKER_IMAGE=rust:1-slim`.
+- The test runner must explicitly add `/usr/local/cargo/bin` to `PATH`; some slim image
+  invocations otherwise fail with `cargo: command not found`.
+- Bash includes source line numbers in `cd` diagnostics. Normalize only those line numbers
+  before comparing stderr, while keeping the actual diagnostic text exact.
+- The Docker test can skip locally when Docker is unavailable, so use
+  `CDS_DOCKER_IMAGE=rust:1-slim cargo test --test docker_cd_equivalence -- --nocapture`
+  with Docker access when changing equivalence behavior.
 
 ## Repository Hygiene
 
