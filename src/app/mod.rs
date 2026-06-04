@@ -2,7 +2,6 @@ mod error;
 
 use std::env;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{AppPaths, Settings, expand_tilde};
@@ -155,13 +154,12 @@ fn semantic_query_in(args: &[OsString], directory: Option<&Path>) -> Option<Stri
         parts.push(arg);
     }
 
-    let query = parts.join(" ");
-    let first = query.chars().find(|ch| !ch.is_whitespace())?;
-
-    if local_directory_starts_with(first, directory) {
+    if args.len() == 1 && local_entry_exists(parts[0], directory) {
         return None;
     }
 
+    let query = parts.join(" ");
+    query.chars().find(|ch| !ch.is_whitespace())?;
     Some(query)
 }
 
@@ -177,28 +175,12 @@ fn is_cd_syntax(arg: &str) -> bool {
         || arg.contains('/')
 }
 
-fn local_directory_starts_with(first: char, directory: Option<&Path>) -> bool {
+fn local_entry_exists(name: &str, directory: Option<&Path>) -> bool {
     let Some(directory) = directory else {
         return true;
     };
 
-    let Ok(entries) = fs::read_dir(directory) else {
-        return true;
-    };
-
-    let first = first.to_lowercase().to_string();
-
-    entries.filter_map(std::result::Result::ok).any(|entry| {
-        if !entry.path().is_dir() {
-            return false;
-        }
-
-        entry
-            .file_name()
-            .to_string_lossy()
-            .to_lowercase()
-            .starts_with(&first)
-    })
+    directory.join(name).exists()
 }
 
 fn current_shell_directory() -> Option<PathBuf> {
@@ -265,9 +247,9 @@ mod tests {
     }
 
     #[test]
-    fn semantic_query_is_allowed_when_no_local_directory_prefix_matches() {
+    fn semantic_query_is_allowed_when_no_exact_local_entry_matches() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
 
         assert_eq!(
             semantic_query_in(&[os("Projects")], Some(temp.path())),
@@ -276,9 +258,20 @@ mod tests {
     }
 
     #[test]
-    fn semantic_query_is_blocked_when_local_directory_prefix_matches() {
+    fn semantic_query_is_allowed_when_only_local_prefix_matches() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join("playground")).unwrap();
+        std::fs::create_dir(temp.path().join("playground")).unwrap();
+
+        assert_eq!(
+            semantic_query_in(&[os("Projects")], Some(temp.path())),
+            Some("Projects".to_string())
+        );
+    }
+
+    #[test]
+    fn semantic_query_is_blocked_when_exact_local_entry_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("Projects")).unwrap();
 
         assert_eq!(
             semantic_query_in(&[os("Projects")], Some(temp.path())),
