@@ -62,26 +62,6 @@ To replace an existing installed binary:
 cargo test --all
 ```
 
-The test suite includes a Docker-backed equivalence test. When Docker is available, it
-mounts this project into a Rust container, builds `cds` without the real embedding
-runtime, generates a fresh random filesystem tree, and compares `cds` against the shell's
-built-in `cd` for exit status, stdout, stderr, `PWD`, `OLDPWD`, and physical path
-behavior.
-
-Use a specific container image with:
-
-```sh
-CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence
-```
-
-Adjust the number of randomized cases with:
-
-```sh
-CDS_DOCKER_RANDOM_CASES=200 cargo test --test docker_cd_equivalence
-```
-
-The Docker image must include Cargo. The default image is `rust:1`.
-
 Default builds include the real local embedding runtime. Use `--no-default-features` with
 `CDS_EMBEDDER=fake` for shell-only checks that do not need `bge-small-en-v1.5`.
 
