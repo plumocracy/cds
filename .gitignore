@@ -1,0 +1,13 @@
+node_modules
+.pnpm-store
+.next
+out
+dist
+.env
+.env*.local
+*.tsbuildinfo
+
+
+# Added by cargo
+
+/target

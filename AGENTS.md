@@ -1,0 +1,200 @@
+# AGENTS.md
+
+## Project Goal
+
+Build `cds`, a Rust command-line tool that acts as a semantic alternative to `cd`.
+
+The user should be able to type a natural-language command such as:
+
+```sh
+cds the last chrome extension I worked on
+```
+
+and have the tool find the most likely matching directory, then navigate the shell there.
+
+Because a child process cannot directly change the parent shell's working directory, `cds`
+must provide a shell integration that evaluates or sources the destination path in the
+user's current shell.
+
+## Core Product Requirements
+
+- Store indexed filesystem knowledge in SQLite.
+- Generate and search vector embeddings with `bge-small-en-v1.5`.
+- Support semantic search over file and directory metadata.
+- Prefer directories that are likely useful navigation targets, not arbitrary files.
+- Include recency signals so phrases like "last thing I worked on" are meaningful.
+- Avoid indexing secrets, generated dependency folders, build artifacts, and large binary
+  content by default.
+- Be fast enough for interactive shell usage.
+- Be deterministic where possible: ranking should be explainable and testable.
+
+## Expected Rust Stack
+
+Prefer stable, well-maintained crates:
+
+- CLI parsing: `clap`
+- SQLite: `sqlx` with SQLite
+- Serialization: `serde`, `serde_json`
+- Error handling: `color_eyre` for binaries, `thiserror` for reusable library errors
+- Filesystem walking: `ignore` or `walkdir`; prefer `ignore` because it respects common
+  ignore files
+- Time handling: `time` or `chrono`
+- Logging/tracing: `tracing`, `tracing-subscriber`
+- Tests: standard Rust tests plus focused integration tests under `tests/`
+
+For embeddings, prefer an implementation path that keeps the tool locally usable:
+
+- Use `bge-small-en-v1.5` through a local model runtime such as ONNX Runtime, Candle, or
+  another Rust-friendly inference backend.
+- Do not introduce a hosted embedding API as the default path.
+- If model download/setup is needed, make it explicit and cache model files outside the
+  repo in a user cache directory.
+
+## Suggested Architecture
+
+Keep the code split between a thin binary and testable library modules.
+
+Suggested modules:
+
+- `cli`: command definitions and argument parsing
+- `config`: config file loading, defaults, ignored paths, model/database locations
+- `db`: SQLite schema, migrations, queries, and transactions
+- `embed`: model loading, text normalization, embedding generation
+- `index`: filesystem scanning, file summarization, change detection, batch indexing
+- `search`: vector similarity, ranking, recency/path heuristics, result explanations
+- `shell`: shell integration output for changing directories
+
+Keep business logic out of `main.rs`.
+
+## SQLite Guidance
+
+SQLite should be the durable source of indexed data.
+
+Track at least:
+
+- indexed paths
+- path type: file or directory
+- parent directory
+- normalized searchable text
+- embedding vector
+- content hash or metadata fingerprint
+- modified time
+- indexed time
+- lightweight ranking signals, such as recent access or matched child files
+
+Use migrations from the beginning. Keep schema changes explicit and reviewed.
+
+Embedding storage options may include:
+
+- `BLOB` containing packed `f32` values
+- `sqlite-vec` or another SQLite vector extension if it is easy to install and test
+
+If using a SQLite extension, preserve a fallback or clear setup error so the CLI does not
+fail opaquely.
+
+## Command Shape
+
+Likely commands:
+
+```sh
+cds init
+cds index [PATH]
+cds search QUERY...
+cds go QUERY...
+cds explain QUERY...
+cds doctor
+```
+
+Shell integration should make the common path concise. For example, the installed shell
+function may call `cds go "$@"` and `cd` to the emitted path.
+
+The Rust binary should not print human-oriented decoration in machine-readable shell
+integration mode. Keep stdout parseable and put diagnostics on stderr.
+
+## Ranking Expectations
+
+Search should combine:
+
+- vector similarity from `bge-small-en-v1.5`
+- directory-level aggregation from matching child files
+- path/name lexical matches
+- recency from filesystem metadata and index history
+- penalties for ignored, hidden, generated, or low-signal paths
+
+Ranking changes should be covered by tests with small synthetic fixtures.
+
+## Indexing Rules
+
+Default excludes should include common high-noise directories:
+
+- `.git`
+- `node_modules`
+- `target`
+- `dist`
+- `build`
+- `.next`
+- `.cache`
+- virtual environments
+- dependency/vendor directories
+
+Do not index obvious secrets by default, including `.env`, private keys, credential files,
+or files matching common secret naming patterns.
+
+For file content, prefer small, meaningful text excerpts. Do not embed very large files
+whole. Skip binary files unless there is a deliberate metadata-only strategy.
+
+## Development Commands
+
+Once the Rust project is initialized, keep these commands working:
+
+```sh
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+cargo build
+```
+
+Run formatting and tests before handing off changes when practical.
+
+## Testing Guidance
+
+Add tests for:
+
+- SQLite migrations and query behavior
+- embedding vector serialization/deserialization
+- ignored path filtering
+- indexing change detection
+- ranking behavior with deterministic fake embeddings
+- shell integration output
+
+Do not make tests depend on downloading or running the real embedding model unless they
+are explicitly marked as slow/integration tests. Use a fake embedder for normal tests.
+
+## Repository Hygiene
+
+- Keep generated databases, model files, caches, and local indexes out of git.
+- Keep sample fixtures small.
+- Prefer explicit config and cache paths under the user's platform cache/config
+  directories.
+- Avoid committing machine-specific absolute paths.
+- Document new commands and shell setup as they are added.
+
+## Agent Workflow
+
+Before editing:
+
+1. Inspect the current tree and existing Rust conventions.
+2. Check `git status` and preserve unrelated user changes.
+3. Prefer small, reviewable changes that move the CLI toward a working vertical slice.
+
+When implementing:
+
+1. Start with schema, config, and testable library behavior.
+2. Use deterministic fake embeddings in tests.
+3. Keep shell-facing output stable and minimal.
+4. Add or update docs when command behavior changes.
+
+Before finishing:
+
+1. Run the relevant formatting and test commands.
+2. Report what changed, which commands passed, and any commands that could not be run.
