@@ -533,19 +533,43 @@ impl Database {
     }
 
     pub async fn reset(&self) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+
+        sqlx::query("PRAGMA secure_delete = ON")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
         sqlx::query("DELETE FROM directory_classifications")
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
         sqlx::query("DELETE FROM indexed_file_chunks")
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
         sqlx::query("DELETE FROM indexed_files")
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
         sqlx::query("DELETE FROM indexed_documents")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await
+            .map_err(|source| DbError::ResetDatabase { source })?;
+        sqlx::query("VACUUM")
             .execute(&self.pool)
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
@@ -1139,6 +1163,32 @@ mod tests {
         })
         .await
         .unwrap();
+        let indexed_file = IndexedFile {
+            path: "/tmp/project/README.md".to_string(),
+            directory_path: "/tmp/project".to_string(),
+            name: "README.md".to_string(),
+            extension: Some("md".to_string()),
+            size_bytes: 12,
+            created_unix_seconds: Some(10),
+            modified_unix_seconds: 12,
+            accessed_unix_seconds: Some(14),
+            readonly: false,
+            content_fingerprint: "mtime:12:len:12:hash:abc".to_string(),
+            indexed_unix_seconds: 34,
+        };
+        let indexed_chunk = IndexedFileChunk {
+            file_path: indexed_file.path.clone(),
+            directory_path: indexed_file.directory_path.clone(),
+            chunk_index: 0,
+            content: "project readme cargo".to_string(),
+            embedding: vec![0.1, 0.2, 0.3],
+            start_byte: 0,
+            end_byte: 20,
+            indexed_unix_seconds: 34,
+        };
+        db.upsert_files_with_chunks(&[(&indexed_file, &[indexed_chunk])])
+            .await
+            .unwrap();
         db.replace_directory_classifications(
             "/tmp/project",
             &[DirectoryClassification {
@@ -1157,6 +1207,14 @@ mod tests {
         db.reset().await.unwrap();
 
         assert_eq!(db.document_count().await.unwrap(), 0);
+        assert_eq!(table_count(&db, "indexed_files").await, 0);
+        assert_eq!(table_count(&db, "indexed_file_chunks").await, 0);
+        assert_eq!(table_count(&db, "directory_classifications").await, 0);
         assert!(db.directory_type_counts().await.unwrap().is_empty());
+    }
+
+    async fn table_count(db: &Database, table: &str) -> i64 {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        sqlx::query_scalar(&sql).fetch_one(&db.pool).await.unwrap()
     }
 }
