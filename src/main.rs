@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{
@@ -77,7 +77,11 @@ async fn run(invocation: Invocation) -> error::Result<()> {
             }
         }
         Invocation::Search { query } => {
-            let results = app::search(query, 10).await?;
+            let mut animation = SearchAnimation::start();
+            let results = app::search(query, 10).await;
+            animation.finish();
+
+            let results = results?;
             for result in results {
                 println!("{:.3}\t{}", result.score, result.path);
             }
@@ -106,6 +110,83 @@ fn confirm_reset() -> error::Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+const SEARCH_LABEL: &str = "searching...";
+
+struct SearchAnimation {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SearchAnimation {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+
+        if !io::stderr().is_terminal() {
+            return Self { stop, worker: None };
+        }
+
+        let worker = Some(spawn_search_animation(Arc::clone(&stop)));
+        Self { stop, worker }
+    }
+
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for SearchAnimation {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn spawn_search_animation(stop: Arc<AtomicBool>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut tick = 0;
+
+        while !stop.load(Ordering::Relaxed) {
+            render_search_frame(tick);
+            tick = tick.wrapping_add(1);
+            thread::sleep(Duration::from_millis(120));
+        }
+
+        clear_search_frame();
+    })
+}
+
+fn render_search_frame(tick: usize) {
+    let (top, bottom) = search_frame(tick);
+    eprint!("\r\x1b[2K{top}\n\r\x1b[2K{bottom}\x1b[1A");
+    let _ = io::stderr().flush();
+}
+
+fn clear_search_frame() {
+    eprint!("\r\x1b[2K\n\r\x1b[2K\x1b[1A\r");
+    let _ = io::stderr().flush();
+}
+
+fn search_frame(tick: usize) -> (String, String) {
+    let chars = SEARCH_LABEL.chars().collect::<Vec<_>>();
+    let active = tick % chars.len();
+    let mut top = String::with_capacity(chars.len());
+    let mut bottom = String::with_capacity(chars.len());
+
+    for (index, ch) in chars.into_iter().enumerate() {
+        if index == active {
+            top.push(ch);
+            bottom.push(' ');
+        } else {
+            top.push(' ');
+            bottom.push(ch);
+        }
+    }
+
+    (top, bottom)
 }
 
 #[derive(Debug, Default)]
@@ -197,4 +278,22 @@ fn render_progress_line(state: &mut ProgressState) {
 
     state.last_len = line.len();
     state.tick = state.tick.wrapping_add(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_frame_bounces_one_letter_at_a_time() {
+        let (top, bottom) = search_frame(0);
+        assert_eq!(top.chars().next(), Some('s'));
+        assert_eq!(bottom.chars().next(), Some(' '));
+        assert_eq!(bottom.chars().collect::<String>(), " earching...");
+
+        let (top, bottom) = search_frame(1);
+        assert_eq!(top.chars().nth(1), Some('e'));
+        assert_eq!(bottom.chars().nth(1), Some(' '));
+        assert_eq!(bottom.chars().collect::<String>(), "s arching...");
+    }
 }
