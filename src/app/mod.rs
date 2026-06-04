@@ -20,19 +20,64 @@ pub struct InitReport {
     pub index: IndexReport,
 }
 
+pub trait InitProgress {
+    fn paths_started(&mut self) {}
+    fn paths_ready(&mut self, _config_dir: &Path, _data_dir: &Path, _cache_dir: &Path) {}
+    fn config_started(&mut self, _path: &Path) {}
+    fn config_ready(&mut self, _path: &Path, _created: bool) {}
+    fn database_started(&mut self, _path: &Path) {}
+    fn database_ready(&mut self, _path: &Path, _created: bool) {}
+    fn model_started(&mut self, _cache_dir: &Path) {}
+    fn model_ready(&mut self, _cache_dir: &Path) {}
+    fn index_started(&mut self, _roots: &[String]) {}
+}
+
+#[derive(Debug, Default)]
+pub struct NoopInitProgress;
+
+impl InitProgress for NoopInitProgress {}
+
 pub async fn init() -> Result<InitReport> {
-    let mut progress = NoopProgress;
-    init_with_progress(&mut progress).await
+    let mut index_progress = NoopProgress;
+    let mut init_progress = NoopInitProgress;
+    init_with_progress_and_steps(&mut index_progress, &mut init_progress).await
 }
 
 pub async fn init_with_progress<P>(progress: &mut P) -> Result<InitReport>
 where
     P: IndexProgress + ?Sized,
 {
+    let mut init_progress = NoopInitProgress;
+    init_with_progress_and_steps(progress, &mut init_progress).await
+}
+
+pub async fn init_with_progress_and_steps<P, I>(
+    progress: &mut P,
+    init_progress: &mut I,
+) -> Result<InitReport>
+where
+    P: IndexProgress + ?Sized,
+    I: InitProgress + ?Sized,
+{
+    init_progress.paths_started();
     let paths = AppPaths::discover()?;
+    init_progress.paths_ready(&paths.config_dir, &paths.data_dir, &paths.cache_dir);
+
+    init_progress.config_started(&paths.config_file);
+    let config_created = !paths.config_file.exists();
     let settings = Settings::load_or_create(&paths.config_file)?;
+    init_progress.config_ready(&paths.config_file, config_created);
+
+    init_progress.database_started(&paths.database_file);
+    let database_created = !paths.database_file.exists();
     let database = Database::open(&paths.database_file).await?;
+    init_progress.database_ready(&paths.database_file, database_created);
+
+    init_progress.model_started(&paths.cache_dir);
     let embedder = RuntimeEmbedder::load(&paths)?;
+    init_progress.model_ready(&paths.cache_dir);
+
+    init_progress.index_started(&settings.index.roots);
     let indexer = Indexer::new(&settings, &database, &embedder);
     let index = indexer
         .index_configured_roots_with_progress(progress)
