@@ -131,6 +131,18 @@ pub enum DbError {
         source: sqlx::Error,
     },
 
+    #[error("failed to read index revision")]
+    ReadIndexRevision {
+        #[source]
+        source: sqlx::Error,
+    },
+
+    #[error("failed to bump index revision")]
+    BumpIndexRevision {
+        #[source]
+        source: sqlx::Error,
+    },
+
     #[error("failed to count indexed documents")]
     CountDocuments {
         #[source]

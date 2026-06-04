@@ -791,9 +791,10 @@ async fn search_cache_for<'a>(
     search_cache: &'a mut Option<SearchCache>,
     generic_terms: &HashSet<String>,
 ) -> Result<(&'a SearchCache, CacheDryRunStatus)> {
+    let revision = database.current_revision().await?;
     let status = if search_cache
         .as_ref()
-        .is_none_or(|cache| !cache.matches_generic_terms(generic_terms))
+        .is_none_or(|cache| !cache.matches_revision_and_generic_terms(revision, generic_terms))
     {
         *search_cache = Some(SearchCache::load(database, generic_terms).await?);
         CacheDryRunStatus::Miss
@@ -1252,6 +1253,57 @@ mod tests {
         ] {
             assert!(is_daemon_client_disconnect(&std::io::Error::from(kind)));
         }
+    }
+
+    #[tokio::test]
+    async fn search_cache_misses_after_database_revision_changes() {
+        use crate::db::{DocumentKind, IndexedDocument};
+
+        let database = Database::open_in_memory().await.unwrap();
+        let generic_terms = HashSet::new();
+        let mut search_cache = None;
+
+        let first_status = {
+            let (_, status) = search_cache_for(&database, &mut search_cache, &generic_terms)
+                .await
+                .unwrap();
+            status
+        };
+        let second_status = {
+            let (_, status) = search_cache_for(&database, &mut search_cache, &generic_terms)
+                .await
+                .unwrap();
+            status
+        };
+        assert_eq!(first_status, CacheDryRunStatus::Miss);
+        assert_eq!(second_status, CacheDryRunStatus::Hit);
+
+        database
+            .upsert_document(&IndexedDocument {
+                path: "/tmp/project".to_string(),
+                name: "project".to_string(),
+                kind: DocumentKind::Directory,
+                parent_path: Some("/tmp".to_string()),
+                searchable_text: "project readme cargo".to_string(),
+                embedding: vec![0.1, 0.2, 0.3],
+                metadata_fingerprint: "fingerprint".to_string(),
+                size_bytes: 4096,
+                created_unix_seconds: Some(10),
+                modified_unix_seconds: 12,
+                accessed_unix_seconds: Some(14),
+                readonly: false,
+                indexed_unix_seconds: 34,
+            })
+            .await
+            .unwrap();
+
+        let stale_status = {
+            let (_, status) = search_cache_for(&database, &mut search_cache, &generic_terms)
+                .await
+                .unwrap();
+            status
+        };
+        assert_eq!(stale_status, CacheDryRunStatus::Miss);
     }
 
     #[test]

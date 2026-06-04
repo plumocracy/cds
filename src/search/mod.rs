@@ -84,27 +84,47 @@ pub struct Searcher<'a, E> {
 #[derive(Debug, Clone)]
 pub struct SearchCache {
     generic_terms: HashSet<String>,
+    revision: i64,
     directories: Vec<IndexedDocument>,
     path_term_stats: PathTermStats,
 }
 
 impl SearchCache {
     pub async fn load(database: &Database, generic_terms: &HashSet<String>) -> Result<Self> {
-        let directories = database
-            .directory_search_documents()
-            .await
-            .map_err(|source| SearchError::LoadDirectories { source })?;
-        let path_term_stats = PathTermStats::from_directories(&directories, generic_terms);
+        loop {
+            let revision = database
+                .current_revision()
+                .await
+                .map_err(|source| SearchError::LoadDirectories { source })?;
+            let directories = database
+                .directory_search_documents()
+                .await
+                .map_err(|source| SearchError::LoadDirectories { source })?;
+            let current_revision = database
+                .current_revision()
+                .await
+                .map_err(|source| SearchError::LoadDirectories { source })?;
+            if revision != current_revision {
+                continue;
+            }
 
-        Ok(Self {
-            generic_terms: generic_terms.clone(),
-            directories,
-            path_term_stats,
-        })
+            let path_term_stats = PathTermStats::from_directories(&directories, generic_terms);
+
+            return Ok(Self {
+                generic_terms: generic_terms.clone(),
+                revision,
+                directories,
+                path_term_stats,
+            });
+        }
     }
 
-    pub fn matches_generic_terms(&self, generic_terms: &HashSet<String>) -> bool {
-        &self.generic_terms == generic_terms
+    pub fn matches_revision_and_generic_terms(
+        &self,
+        revision: i64,
+        generic_terms: &HashSet<String>,
+    ) -> bool {
+        self.revision == revision && &self.generic_terms == generic_terms
     }
 }
 

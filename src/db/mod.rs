@@ -62,7 +62,29 @@ impl Database {
         Ok(Self { pool })
     }
 
+    pub async fn current_revision(&self) -> Result<i64> {
+        sqlx::query_scalar(
+            "
+            SELECT value
+            FROM index_metadata
+            WHERE key = 'revision'
+            ",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|source| DbError::ReadIndexRevision { source })
+    }
+
     pub async fn upsert_document(&self, document: &IndexedDocument) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::UpsertDocument {
+                    path: document.path.clone(),
+                    source,
+                })?;
+
         sqlx::query(
             "
             INSERT INTO indexed_documents (
@@ -117,17 +139,35 @@ impl Database {
         .bind(document.accessed_unix_seconds)
         .bind(document.readonly)
         .bind(document.indexed_unix_seconds)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::UpsertDocument {
             path: document.path.clone(),
             source,
         })?;
 
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::UpsertDocument {
+                path: document.path.clone(),
+                source,
+            })?;
+
         Ok(())
     }
 
     pub async fn upsert_file(&self, file: &IndexedFile) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|source| DbError::UpsertFile {
+                path: file.path.clone(),
+                source,
+            })?;
+
         sqlx::query(
             "
             INSERT INTO indexed_files (
@@ -170,12 +210,21 @@ impl Database {
         .bind(file.readonly)
         .bind(&file.content_fingerprint)
         .bind(file.indexed_unix_seconds)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::UpsertFile {
             path: file.path.clone(),
             source,
         })?;
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::UpsertFile {
+                path: file.path.clone(),
+                source,
+            })?;
 
         Ok(())
     }
@@ -295,6 +344,7 @@ impl Database {
             }
         }
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -308,9 +358,18 @@ impl Database {
         file_path: &str,
         chunks: &[IndexedFileChunk],
     ) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::DeleteFileChunks {
+                    path: file_path.to_string(),
+                    source,
+                })?;
+
         sqlx::query("DELETE FROM indexed_file_chunks WHERE file_path = ?")
             .bind(file_path)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::DeleteFileChunks {
                 path: file_path.to_string(),
@@ -351,7 +410,7 @@ impl Database {
                     .map_err(|source| DbError::MetadataSizeOverflow { source })?,
             )
             .bind(chunk.indexed_unix_seconds)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::InsertFileChunk {
                 path: chunk.file_path.clone(),
@@ -359,6 +418,12 @@ impl Database {
                 source,
             })?;
         }
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::CommitFileBatch { source })?;
 
         Ok(())
     }
@@ -391,6 +456,7 @@ impl Database {
                 source,
             })?;
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -520,6 +586,7 @@ impl Database {
             }
         }
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -533,9 +600,18 @@ impl Database {
         directory_path: &str,
         classifications: &[DirectoryClassification],
     ) -> Result<()> {
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::ReplaceDirectoryClassifications {
+                    path: directory_path.to_string(),
+                    source,
+                })?;
+
         sqlx::query("DELETE FROM directory_classifications WHERE directory_path = ?")
             .bind(directory_path)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::ReplaceDirectoryClassifications {
                 path: directory_path.to_string(),
@@ -563,7 +639,7 @@ impl Database {
             .bind(&classification.evidence_path)
             .bind(&classification.evidence_summary)
             .bind(classification.detected_unix_seconds)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|source| DbError::InsertDirectoryClassification {
                 path: classification.directory_path.clone(),
@@ -572,12 +648,29 @@ impl Database {
             })?;
         }
 
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::ReplaceDirectoryClassifications {
+                path: directory_path.to_string(),
+                source,
+            })?;
+
         Ok(())
     }
 
     pub async fn delete_path_tree(&self, path: &str) -> Result<()> {
         let path_len = i64::try_from(path.len())
             .map_err(|source| DbError::EmbeddingDimensionOverflow { source })?;
+        let mut transaction =
+            self.pool
+                .begin()
+                .await
+                .map_err(|source| DbError::DeletePathTree {
+                    path: path.to_string(),
+                    source,
+                })?;
 
         sqlx::query(
             "
@@ -595,7 +688,7 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -629,7 +722,7 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -663,7 +756,7 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -697,7 +790,7 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
@@ -720,12 +813,21 @@ impl Database {
         .bind(path_len)
         .bind(path)
         .bind(path_len)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|source| DbError::DeletePathTree {
             path: path.to_string(),
             source,
         })?;
+
+        bump_index_revision(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| DbError::DeletePathTree {
+                path: path.to_string(),
+                source,
+            })?;
 
         Ok(())
     }
@@ -762,6 +864,7 @@ impl Database {
             .await
             .map_err(|source| DbError::ResetDatabase { source })?;
 
+        bump_index_revision(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -1232,7 +1335,7 @@ async fn migrate_pool(pool: &SqlitePool) -> Result<()> {
         .run(pool)
         .await
         .map_err(|source| DbError::Migrate { source })?;
-    sqlx::query("PRAGMA user_version = 5")
+    sqlx::query("PRAGMA user_version = 6")
         .execute(pool)
         .await
         .map_err(|source| DbError::PrepareLegacyMigration { source })?;
@@ -1395,6 +1498,21 @@ async fn add_legacy_column_if_missing(
         .execute(pool)
         .await
         .map_err(|source| DbError::PrepareLegacyMigration { source })?;
+    Ok(())
+}
+
+async fn bump_index_revision(transaction: &mut Transaction<'_, Sqlite>) -> Result<()> {
+    sqlx::query(
+        "
+        INSERT INTO index_metadata (key, value)
+        VALUES ('revision', 1)
+        ON CONFLICT(key) DO UPDATE SET value = value + 1
+        ",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|source| DbError::BumpIndexRevision { source })?;
+
     Ok(())
 }
 
@@ -1570,6 +1688,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn indexed_mutations_bump_revision() {
+        let db = Database::open_in_memory().await.unwrap();
+        let start = db.current_revision().await.unwrap();
+
+        db.upsert_document(&IndexedDocument {
+            path: "/tmp/project".to_string(),
+            name: "project".to_string(),
+            kind: DocumentKind::Directory,
+            parent_path: Some("/tmp".to_string()),
+            searchable_text: "project readme cargo".to_string(),
+            embedding: vec![0.1, 0.2, 0.3],
+            metadata_fingerprint: "fingerprint".to_string(),
+            size_bytes: 4096,
+            created_unix_seconds: Some(10),
+            modified_unix_seconds: 12,
+            accessed_unix_seconds: Some(14),
+            readonly: false,
+            indexed_unix_seconds: 34,
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.current_revision().await.unwrap(), start + 1);
+
+        db.reset().await.unwrap();
+        assert_eq!(db.current_revision().await.unwrap(), start + 2);
+    }
+
+    #[tokio::test]
     async fn migrates_v1_database_to_metadata_schema() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cds.sqlite");
@@ -1604,7 +1750,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
+        assert_eq!(db.current_revision().await.unwrap(), 0);
         db.upsert_document(&IndexedDocument {
             path: "/tmp/project".to_string(),
             name: "project".to_string(),
