@@ -44,11 +44,11 @@ Prefer stable, well-maintained crates:
 
 For embeddings, prefer an implementation path that keeps the tool locally usable:
 
-- Use `bge-small-en-v1.5` through a local model runtime such as ONNX Runtime, Candle, or
-  another Rust-friendly inference backend.
+- Use `BAAI/bge-small-en-v1.5` through FastEmbed/ONNX for production text embeddings.
 - Do not introduce a hosted embedding API as the default path.
 - If model download/setup is needed, make it explicit and cache model files outside the
   repo in a user cache directory.
+- Keep deterministic fake embeddings available for normal tests with `CDS_EMBEDDER=fake`.
 
 ## Suggested Architecture
 
@@ -183,13 +183,16 @@ The Docker equivalence test runs the project inside a Rust container and compare
 against Bash's built-in `cd` for status, stdout, stderr, `PWD`, `OLDPWD`, and physical path.
 Keep these details in mind when editing it:
 
-- CI currently uses `CDS_DOCKER_IMAGE=rust:1-slim`.
-- The test runner must explicitly add `/usr/local/cargo/bin` to `PATH`; some slim image
+- CI currently uses `CDS_DOCKER_IMAGE=rust:1`.
+- The Docker image must include Cargo and C++ standard library/linker support. The
+  FastEmbed/ONNX dependency links against `libstdc++`, so very small images such as
+  `rust:1-slim` can fail with `unable to find library -lstdc++`.
+- The test runner must explicitly add `/usr/local/cargo/bin` to `PATH`; some container
   invocations otherwise fail with `cargo: command not found`.
 - Bash includes source line numbers in `cd` diagnostics. Normalize only those line numbers
   before comparing stderr, while keeping the actual diagnostic text exact.
 - The Docker test can skip locally when Docker is unavailable, so use
-  `CDS_DOCKER_IMAGE=rust:1-slim cargo test --test docker_cd_equivalence -- --nocapture`
+  `CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence -- --nocapture`
   with Docker access when changing equivalence behavior.
 
 ## Repository Hygiene

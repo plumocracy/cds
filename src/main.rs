@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{
@@ -52,7 +52,17 @@ async fn run(invocation: Invocation) -> error::Result<()> {
                 println!("{}\t{}", count.count, count.label);
             }
         }
-        Invocation::EmitCd { args } => write_stdout(&app::resolve_cd_script(args).await)?,
+        Invocation::EmitCd { args } => {
+            let mut animation = app::implied_search_query(&args)
+                .is_some()
+                .then(SearchAnimation::start);
+            let script = app::resolve_cd_script(args).await;
+            if let Some(animation) = &mut animation {
+                animation.finish();
+            }
+
+            write_stdout(&script)?;
+        }
         Invocation::ShellInit { shell } => write_stdout(shell_init(shell).as_bytes())?,
         Invocation::Init => {
             let mut progress = TerminalIndexProgress::start();
@@ -77,7 +87,11 @@ async fn run(invocation: Invocation) -> error::Result<()> {
             }
         }
         Invocation::Search { query } => {
-            let results = app::search(query, 10).await?;
+            let mut animation = SearchAnimation::start();
+            let results = app::search(query, 10).await;
+            animation.finish();
+
+            let results = results?;
             for result in results {
                 println!("{:.3}\t{}", result.score, result.path);
             }
@@ -106,6 +120,68 @@ fn confirm_reset() -> error::Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+const SEARCH_LABEL: &str = "Searching";
+
+struct SearchAnimation {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SearchAnimation {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+
+        if !io::stderr().is_terminal() {
+            return Self { stop, worker: None };
+        }
+
+        let worker = Some(spawn_search_animation(Arc::clone(&stop)));
+        Self { stop, worker }
+    }
+
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for SearchAnimation {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn spawn_search_animation(stop: Arc<AtomicBool>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut tick = 0;
+
+        while !stop.load(Ordering::Relaxed) {
+            render_search_frame(tick);
+            tick = tick.wrapping_add(1);
+            thread::sleep(Duration::from_millis(120));
+        }
+
+        clear_search_frame();
+    })
+}
+
+fn render_search_frame(tick: usize) {
+    eprint!("\r\x1b[2K{}", search_frame(tick));
+    let _ = io::stderr().flush();
+}
+
+fn clear_search_frame() {
+    eprint!("\r\x1b[2K");
+    let _ = io::stderr().flush();
+}
+
+fn search_frame(tick: usize) -> String {
+    let dots = ".".repeat((tick % 3) + 1);
+    format!("{SEARCH_LABEL}{dots}")
 }
 
 #[derive(Debug, Default)]
@@ -197,4 +273,17 @@ fn render_progress_line(state: &mut ProgressState) {
 
     state.last_len = line.len();
     state.tick = state.tick.wrapping_add(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_frame_cycles_dots() {
+        assert_eq!(search_frame(0), "Searching.");
+        assert_eq!(search_frame(1), "Searching..");
+        assert_eq!(search_frame(2), "Searching...");
+        assert_eq!(search_frame(3), "Searching.");
+    }
 }

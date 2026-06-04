@@ -25,7 +25,6 @@ the directory you're looking for and invoke cd to navigate you there.
 Embeddings get expensive fast and I have to use a very tiny model (bge-small-en-v1.5) to keep this lean.
 If we have a ton of parameteres in the database A: The db would be *huge* and B: The search would take a lot of time.
 
-
 ## Build
 
 ```sh
@@ -70,8 +69,11 @@ stdout, stderr, `PWD`, `OLDPWD`, and physical path behavior.
 Use a specific container image with:
 
 ```sh
-CDS_DOCKER_IMAGE=rust:1-slim cargo test --test docker_cd_equivalence
+CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence
 ```
+
+The Docker image must include Cargo and the C++ standard library/linker support required by
+the embedding runtime. The default image is `rust:1`.
 
 ## Indexing
 
@@ -143,16 +145,37 @@ Hidden directories are always skipped and pruned from the local index. Each conf
 root is treated as a container, and each top-level directory inside it is indexed only through
 `max_depth_per_top_level_directory` levels.
 
-The embedder is still deterministic and fake for now. That is deliberate: it lets the config,
-schema, scanning, and ranking plumbing settle before the real `bge-small-en-v1.5` runtime is
-wired in.
+Text-file chunks are embedded locally with `BAAI/bge-small-en-v1.5` through FastEmbed/ONNX.
+Model files are cached under `~/.cache/cds/models` by default, or under `CDS_CACHE_DIR/models`
+when that environment variable is set. Tests can force deterministic fake embeddings with
+`CDS_EMBEDDER=fake`.
 
 ## Directory Types
 
-Directory type inference is rule-based and data-driven. Built-in types such as `rust project`
-and `chrome extension` are defined as JSON. Custom/community detectors can be added to the
-`detectors` array in `~/.config/cds/config.json`; `cds --index` loads them every time it
-indexes.
+Directory type inference is rule-based and data-driven. `cds` does not ask the embedding
+model to guess whether a directory is a `rust project`, `chrome extension`, `rails app`, etc.
+Instead, it runs JSON detectors against each indexed directory during `cds --init` and
+`cds --index`.
+
+Built-in detectors live in `src/index/directory_types/` and currently cover:
+
+- `chrome extension`
+- `database migrations`
+- `next.js app`
+- `node project`
+- `python project`
+- `rails app`
+- `rust project`
+
+Each detector has a `label` and one or more `rules`. A rule matches only when all of its
+`signals` match. If a detector has multiple matching rules for the same directory, `cds`
+keeps one classification for that label and prefers the highest-confidence rule. Each stored
+classification includes the directory path, label, confidence, rule id, evidence path,
+evidence summary, and detection timestamp.
+
+Custom detectors are added to the `detectors` array in `~/.config/cds/config.json`.
+`cds --index` loads that array every time it indexes, so editing the config and re-running
+`cds --index` is enough to apply a new directory type locally.
 
 Example detector:
 
@@ -176,9 +199,82 @@ Example detector:
 }
 ```
 
-Supported signal kinds are `file_exists`, `file_contains`, `directory_name`, and `child_name`.
-Each matched rule stores the label, confidence, detector id, evidence path, and evidence
-summary in SQLite.
+Supported signal kinds:
+
+- `file_exists`: matches when a relative file path exists inside the directory.
+- `file_contains`: reads a small text file and checks for text. Use `contains_any`,
+  `contains_all`, or both.
+- `directory_name`: checks the directory's own name with `equals_any` and/or
+  `contains_any`.
+- `child_name`: checks immediate child names with `contains_any`, `starts_with_any`,
+  and/or `ends_with_any`.
+
+Signals are case-insensitive. Paths are relative to the directory being classified.
+`file_contains` ignores binary files and files larger than 128 KiB.
+
+For example, a custom detector for Terraform projects can be added directly to
+`~/.config/cds/config.json`:
+
+```json
+{
+  "index": {
+    "roots": ["~/Projects"],
+    "exclude": [
+      ".git",
+      "node_modules",
+      "target",
+      "dist",
+      "build",
+      ".next",
+      ".cache",
+      ".venv",
+      "venv",
+      "vendor",
+      "*.xcassets",
+      "*.imageset",
+      "*.appiconset",
+      "*.colorset"
+    ],
+    "max_file_bytes": 65536,
+    "max_excerpt_bytes": 4096,
+    "max_entries_per_directory": 80,
+    "max_depth_per_top_level_directory": 3,
+    "max_chunk_bytes": 4096
+  },
+  "detectors": [
+    {
+      "label": "terraform project",
+      "rules": [
+        {
+          "id": "terraform_files",
+          "confidence": 0.95,
+          "evidence_summary": "directory contains Terraform files",
+          "signals": [
+            {
+              "kind": "child_name",
+              "ends_with_any": [".tf", ".tfvars"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+After saving the config:
+
+```sh
+cds --index
+cds --dir-type-count
+```
+
+To add a built-in/community detector to the project itself, add a new JSON file under
+`src/index/directory_types/`, then register it in `BUILTIN_DEFINITIONS` in
+`src/index/classify.rs`. Prefer high-confidence signals that are difficult to trigger by
+accident. For example, checking that `manifest.json` contains `"manifest_version"` and at
+least one browser-extension field is better than classifying every directory with any
+`manifest.json` as a Chrome extension.
 
 Search indexed directories:
 
@@ -203,11 +299,10 @@ type classifications. The database file and schema are kept in place.
 
 When the shell integration is installed, `cds` also tries semantic search automatically for
 plain directory changes that do not look like local `cd` usage. For example, `cds Projects`
-first checks the current directory for any folder starting with `p`. If such a folder exists,
-`cds` delegates to the shell's built-in `cd` exactly as usual. If no local folder starts with
-that character, `cds` searches the index and emits a `cd` to the best existing indexed
-directory. Flags, `-`, `--`, `~`, `.`, `..`, and paths containing `/` always use normal `cd`
-behavior.
+first checks whether `./Projects` exists exactly. If it does, `cds` delegates to the shell's
+built-in `cd` exactly as usual. If it does not, `cds` searches the index and emits a `cd` to
+the best existing indexed directory. Flags, `-`, `--`, `~`, `.`, `..`, and paths containing
+`/` always use normal `cd` behavior.
 
 ## Shell Setup
 

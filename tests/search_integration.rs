@@ -34,13 +34,44 @@ fn hidden_emit_searches_when_local_prefix_is_absent() {
 }
 
 #[test]
-fn hidden_emit_preserves_cd_when_local_prefix_exists() {
+fn hidden_emit_searches_when_only_local_prefix_exists() {
     let fixture = SearchFixture::new();
     fixture.init();
 
     let cwd = fixture.temp.path().join("cwd");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir(cwd.join("music")).unwrap();
+
+    let output = fixture
+        .cds()
+        .arg("--cds-emit")
+        .arg("--")
+        .arg("manifest")
+        .current_dir(&cwd)
+        .env("PWD", &cwd)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = format!(
+        "builtin cd '{}'\n",
+        fixture.project_dir.to_string_lossy().replace('\'', "'\\''")
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+}
+
+#[test]
+fn hidden_emit_preserves_cd_when_exact_local_entry_exists() {
+    let fixture = SearchFixture::new();
+    fixture.init();
+
+    let cwd = fixture.temp.path().join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir(cwd.join("manifest")).unwrap();
 
     let output = fixture
         .cds()
@@ -147,6 +178,7 @@ impl SearchFixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cds"));
         command
             .env("HOME", self.temp.path())
+            .env("CDS_EMBEDDER", "fake")
             .env("CDS_CONFIG_DIR", self.temp.path().join("config"))
             .env("CDS_DATA_DIR", self.temp.path().join("data"))
             .env("CDS_CACHE_DIR", self.temp.path().join("cache"));

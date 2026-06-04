@@ -91,5 +91,5 @@ jobs:
 
       - name: Run Docker cd equivalence test
         env:
-          CDS_DOCKER_IMAGE: rust:1-slim
+          CDS_DOCKER_IMAGE: rust:1
         run: cargo test --test docker_cd_equivalence -- --nocapture

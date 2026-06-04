@@ -2,13 +2,12 @@ mod error;
 
 use std::env;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{AppPaths, Settings, expand_tilde};
 use crate::db::{Database, DirectoryTypeCount};
-use crate::embed::FakeEmbedder;
-use crate::error::{Result, app_err, config_err};
+use crate::embed::{BgeSmallEmbedder, Embedder, FakeEmbedder};
+use crate::error::{Result, app_err, config_err, embed_err};
 use crate::index::{IndexProgress, IndexReport, Indexer, NoopProgress};
 use crate::search::{SearchResult, Searcher};
 
@@ -33,7 +32,7 @@ where
     let paths = AppPaths::discover()?;
     let settings = Settings::load_or_create(&paths.config_file)?;
     let database = Database::open(&paths.database_file).await?;
-    let embedder = FakeEmbedder::default();
+    let embedder = RuntimeEmbedder::load(&paths)?;
     let indexer = Indexer::new(&settings, &database, &embedder);
     let index = indexer
         .index_configured_roots_with_progress(progress)
@@ -58,7 +57,7 @@ where
     let paths = AppPaths::discover()?;
     let settings = Settings::load_or_create(&paths.config_file)?;
     let database = Database::open(&paths.database_file).await?;
-    let embedder = FakeEmbedder::default();
+    let embedder = RuntimeEmbedder::load(&paths)?;
     let indexer = Indexer::new(&settings, &database, &embedder);
 
     if roots.is_empty() {
@@ -88,7 +87,7 @@ pub async fn search(query: Vec<OsString>, limit: usize) -> Result<Vec<SearchResu
 pub async fn search_text(query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     let paths = AppPaths::discover()?;
     let database = Database::open_existing(&paths.database_file).await?;
-    let embedder = FakeEmbedder::default();
+    let embedder = RuntimeEmbedder::load(&paths)?;
     let searcher = Searcher::new(&database, &embedder);
     Ok(searcher.search(query, limit).await?)
 }
@@ -106,7 +105,7 @@ pub async fn reset_database() -> Result<()> {
 }
 
 pub async fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
-    if let Some(query) = semantic_query(&args)
+    if let Some(query) = implied_search_query(&args)
         && let Ok(results) = search_text(&query, 5).await
         && let Some(result) = results
             .into_iter()
@@ -116,6 +115,10 @@ pub async fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
     }
 
     crate::emit_cd_script(&args)
+}
+
+pub fn implied_search_query(args: &[OsString]) -> Option<String> {
+    semantic_query(args)
 }
 
 fn join_query(query: Vec<OsString>) -> Result<String> {
@@ -151,13 +154,12 @@ fn semantic_query_in(args: &[OsString], directory: Option<&Path>) -> Option<Stri
         parts.push(arg);
     }
 
-    let query = parts.join(" ");
-    let first = query.chars().find(|ch| !ch.is_whitespace())?;
-
-    if local_directory_starts_with(first, directory) {
+    if args.len() == 1 && local_entry_exists(parts[0], directory) {
         return None;
     }
 
+    let query = parts.join(" ");
+    query.chars().find(|ch| !ch.is_whitespace())?;
     Some(query)
 }
 
@@ -173,28 +175,12 @@ fn is_cd_syntax(arg: &str) -> bool {
         || arg.contains('/')
 }
 
-fn local_directory_starts_with(first: char, directory: Option<&Path>) -> bool {
+fn local_entry_exists(name: &str, directory: Option<&Path>) -> bool {
     let Some(directory) = directory else {
         return true;
     };
 
-    let Ok(entries) = fs::read_dir(directory) else {
-        return true;
-    };
-
-    let first = first.to_lowercase().to_string();
-
-    entries.filter_map(std::result::Result::ok).any(|entry| {
-        if !entry.path().is_dir() {
-            return false;
-        }
-
-        entry
-            .file_name()
-            .to_string_lossy()
-            .to_lowercase()
-            .starts_with(&first)
-    })
+    directory.join(name).exists()
 }
 
 fn current_shell_directory() -> Option<PathBuf> {
@@ -202,6 +188,54 @@ fn current_shell_directory() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
         .or_else(|| env::current_dir().ok())
+}
+
+enum RuntimeEmbedder {
+    Bge(Box<BgeSmallEmbedder>),
+    Fake(FakeEmbedder),
+}
+
+impl RuntimeEmbedder {
+    fn load(paths: &AppPaths) -> Result<Self> {
+        if env::var("CDS_EMBEDDER").is_ok_and(|value| value.eq_ignore_ascii_case("fake")) {
+            return Ok(Self::Fake(FakeEmbedder::default()));
+        }
+
+        BgeSmallEmbedder::new(&paths.cache_dir)
+            .map(Box::new)
+            .map(Self::Bge)
+            .map_err(embed_err)
+    }
+}
+
+impl Embedder for RuntimeEmbedder {
+    fn dimensions(&self) -> usize {
+        match self {
+            Self::Bge(embedder) => embedder.dimensions(),
+            Self::Fake(embedder) => embedder.dimensions(),
+        }
+    }
+
+    fn embed(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
+        match self {
+            Self::Bge(embedder) => embedder.embed(text),
+            Self::Fake(embedder) => embedder.embed(text),
+        }
+    }
+
+    fn embed_document(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
+        match self {
+            Self::Bge(embedder) => embedder.embed_document(text),
+            Self::Fake(embedder) => embedder.embed_document(text),
+        }
+    }
+
+    fn embed_query(&self, text: &str) -> crate::embed::Result<Vec<f32>> {
+        match self {
+            Self::Bge(embedder) => embedder.embed_query(text),
+            Self::Fake(embedder) => embedder.embed_query(text),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,9 +247,9 @@ mod tests {
     }
 
     #[test]
-    fn semantic_query_is_allowed_when_no_local_directory_prefix_matches() {
+    fn semantic_query_is_allowed_when_no_exact_local_entry_matches() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
 
         assert_eq!(
             semantic_query_in(&[os("Projects")], Some(temp.path())),
@@ -224,9 +258,20 @@ mod tests {
     }
 
     #[test]
-    fn semantic_query_is_blocked_when_local_directory_prefix_matches() {
+    fn semantic_query_is_allowed_when_only_local_prefix_matches() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join("playground")).unwrap();
+        std::fs::create_dir(temp.path().join("playground")).unwrap();
+
+        assert_eq!(
+            semantic_query_in(&[os("Projects")], Some(temp.path())),
+            Some("Projects".to_string())
+        );
+    }
+
+    #[test]
+    fn semantic_query_is_blocked_when_exact_local_entry_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("Projects")).unwrap();
 
         assert_eq!(
             semantic_query_in(&[os("Projects")], Some(temp.path())),
@@ -261,5 +306,12 @@ mod tests {
             semantic_query_in(&[os("chrome"), os("extension")], Some(temp.path())),
             Some("chrome extension".to_string())
         );
+    }
+
+    #[test]
+    fn implied_search_query_uses_cd_semantic_rules() {
+        assert_eq!(implied_search_query(&[os("-P"), os("Projects")]), None);
+        assert_eq!(implied_search_query(&[os("../Projects")]), None);
+        assert_eq!(implied_search_query(&[]), None);
     }
 }

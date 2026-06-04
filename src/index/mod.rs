@@ -135,6 +135,11 @@ mod tests {
         let ignored = app.join("node_modules");
         fs::create_dir_all(&ignored).unwrap();
         fs::write(app.join("README.md"), "Chrome extension manifest tools").unwrap();
+        fs::write(
+            app.join(".env.production"),
+            "DATABASE_URL=postgres://secret",
+        )
+        .unwrap();
         fs::write(ignored.join("package.json"), "should not appear").unwrap();
         let asset_catalog = app.join("macos/Assets.xcassets/Custom Icon.appiconset");
         fs::create_dir_all(&asset_catalog).unwrap();
@@ -194,7 +199,7 @@ mod tests {
         assert_eq!(report.directories_indexed, 3);
         assert_eq!(report.text_files_indexed, 1);
         assert_eq!(report.file_chunks_indexed, 1);
-        assert_eq!(report.entries_skipped, 3);
+        assert_eq!(report.entries_skipped, 4);
         assert_eq!(database.document_count().await.unwrap(), 3);
 
         let app_document = database
@@ -208,6 +213,7 @@ mod tests {
                 .contains("Chrome extension manifest tools")
         );
         assert!(!app_document.searchable_text.contains("should not appear"));
+        assert!(!app_document.searchable_text.contains("DATABASE_URL"));
         assert!(!app_document.searchable_text.contains(".vscode"));
         assert_eq!(
             database
