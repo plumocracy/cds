@@ -65,8 +65,10 @@ for dir in "${dirs[@]}"; do
     printf 'fixture file for %s\n' "$dir" > "$dir/file_$RANDOM.txt"
 done
 
+cds_init="$(cds --shell-init bash)"
+
 setup_cds() {
-    eval "$(cds --shell-init bash)"
+    eval "$cds_init"
 }
 
 normalize_stderr() {
@@ -183,7 +185,8 @@ compare_case "cd dash" "$tree_root" "$space_dir" "" -
 compare_case "invalid directory" "$tree_root" "$space_dir" "" "$tree_root/does-not-exist"
 compare_case "too many args" "$tree_root" "$space_dir" "" "$space_dir" "$quote_dir"
 
-for i in $(seq 1 60); do
+random_cases="${CDS_DOCKER_RANDOM_CASES:-60}"
+for i in $(seq 1 "$random_cases"); do
     start="${dirs[$((RANDOM % ${#dirs[@]}))]}"
     oldpwd="${dirs[$((RANDOM % ${#dirs[@]}))]}"
     target="${dirs[$((RANDOM % ${#dirs[@]}))]}"

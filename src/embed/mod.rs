@@ -1,7 +1,9 @@
+#[cfg(feature = "real-embedder")]
 mod bge;
 mod error;
 mod fake;
 
+#[cfg(feature = "real-embedder")]
 pub use bge::{BGE_SMALL_EN_V15_DIMENSIONS, BgeSmallEmbedder};
 pub use error::EmbedError;
 pub use fake::FakeEmbedder;
