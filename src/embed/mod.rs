@@ -1,7 +1,9 @@
+#[cfg(feature = "real-embedder")]
 mod bge;
 mod error;
 mod fake;
 
+#[cfg(feature = "real-embedder")]
 pub use bge::{BGE_SMALL_EN_V15_DIMENSIONS, BgeSmallEmbedder};
 pub use error::EmbedError;
 pub use fake::FakeEmbedder;
@@ -14,6 +16,10 @@ pub trait Embedder {
 
     fn embed_document(&self, text: &str) -> Result<Vec<f32>> {
         self.embed(text)
+    }
+
+    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|text| self.embed_document(text)).collect()
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {

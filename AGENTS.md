@@ -105,10 +105,12 @@ Current user-facing commands:
 
 ```sh
 cds --init
+cds --daemon
 cds --index [PATH...]
 cds --search QUERY...
 cds --dir-type-count
 cds --reset
+cds --restart-daemon
 cds --shell-init [bash|zsh]
 ```
 
@@ -174,26 +176,9 @@ Add tests for:
 - indexing change detection
 - ranking behavior with deterministic fake embeddings
 - shell integration output
-- Docker-backed `cd` equivalence for Bash behavior
 
 Do not make tests depend on downloading or running the real embedding model unless they
 are explicitly marked as slow/integration tests. Use a fake embedder for normal tests.
-
-The Docker equivalence test runs the project inside a Rust container and compares `cds`
-against Bash's built-in `cd` for status, stdout, stderr, `PWD`, `OLDPWD`, and physical path.
-Keep these details in mind when editing it:
-
-- CI currently uses `CDS_DOCKER_IMAGE=rust:1`.
-- The Docker image must include Cargo and C++ standard library/linker support. The
-  FastEmbed/ONNX dependency links against `libstdc++`, so very small images such as
-  `rust:1-slim` can fail with `unable to find library -lstdc++`.
-- The test runner must explicitly add `/usr/local/cargo/bin` to `PATH`; some container
-  invocations otherwise fail with `cargo: command not found`.
-- Bash includes source line numbers in `cd` diagnostics. Normalize only those line numbers
-  before comparing stderr, while keeping the actual diagnostic text exact.
-- The Docker test can skip locally when Docker is unavailable, so use
-  `CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence -- --nocapture`
-  with Docker access when changing equivalence behavior.
 
 ## Repository Hygiene
 

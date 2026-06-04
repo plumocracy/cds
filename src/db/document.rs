@@ -49,8 +49,30 @@ pub struct FileChunkMatch {
     pub directory_path: String,
     pub content: String,
     pub embedding: Vec<f32>,
+    pub is_current: bool,
     pub file_modified_unix_seconds: i64,
     pub directory_modified_unix_seconds: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModifiedTimeRange {
+    pub start_unix_seconds: Option<i64>,
+    pub end_unix_seconds: Option<i64>,
+}
+
+impl ModifiedTimeRange {
+    pub fn contains(self, unix_seconds: i64) -> bool {
+        if self
+            .start_unix_seconds
+            .is_some_and(|start| unix_seconds < start)
+        {
+            return false;
+        }
+        if self.end_unix_seconds.is_some_and(|end| unix_seconds >= end) {
+            return false;
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

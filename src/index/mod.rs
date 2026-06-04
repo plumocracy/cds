@@ -46,7 +46,7 @@ where
         progress: &mut P,
     ) -> Result<IndexReport>
     where
-        P: IndexProgress + ?Sized,
+        P: IndexProgress + Send + ?Sized,
     {
         let roots = self
             .settings
@@ -60,13 +60,31 @@ where
         self.index_roots_with_progress(roots, &mut progress).await
     }
 
+    pub async fn index_file_changes(
+        &self,
+        changed_files: Vec<PathBuf>,
+        deleted_files: Vec<String>,
+    ) -> Result<IndexReport> {
+        let mut report = IndexReport::default();
+        scanner::index_file_changes(
+            changed_files,
+            deleted_files,
+            self.settings,
+            self.database,
+            self.embedder,
+            &mut report,
+        )
+        .await?;
+        Ok(report)
+    }
+
     pub async fn index_roots_with_progress<P>(
         &self,
         roots: Vec<PathBuf>,
         progress: &mut P,
     ) -> Result<IndexReport>
     where
-        P: IndexProgress + ?Sized,
+        P: IndexProgress + Send + ?Sized,
     {
         let mut report = IndexReport::default();
 
@@ -122,10 +140,14 @@ fn is_excluded_index_root(settings: &Settings, root: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
     use crate::db::{Database, DocumentKind, IndexedDocument};
-    use crate::embed::FakeEmbedder;
+    use crate::embed::{Embedder, FakeEmbedder};
 
     #[tokio::test]
     async fn indexes_directory_summaries_and_skips_excluded_paths() {
@@ -228,6 +250,68 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn batches_file_chunk_embeddings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Projects");
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("README.md"), "alpha").unwrap();
+        fs::write(app.join("Cargo.toml"), "bravo").unwrap();
+        fs::write(app.join("schema.sql"), "charlie").unwrap();
+
+        let settings = Settings::default();
+        let database = Database::open_in_memory().await.unwrap();
+        let embedder = CountingEmbedder::new(16);
+        let calls = Arc::clone(&embedder.document_batch_calls);
+        let indexer = Indexer::new(&settings, &database, &embedder);
+
+        let report = indexer.index_roots(vec![root]).await.unwrap();
+
+        assert_eq!(report.text_files_indexed, 3);
+        assert_eq!(report.file_chunks_indexed, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn indexes_only_changed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Projects");
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let readme = app.join("README.md");
+        let cargo = app.join("Cargo.toml");
+        fs::write(&readme, "initial readme content").unwrap();
+        fs::write(&cargo, "[package]\nname = \"app\"").unwrap();
+
+        let settings = Settings::default();
+        let database = Database::open_in_memory().await.unwrap();
+        let embedder = FakeEmbedder::new(16);
+        let indexer = Indexer::new(&settings, &database, &embedder);
+        indexer.index_roots(vec![root]).await.unwrap();
+
+        fs::write(&readme, "changed readme content").unwrap();
+        let report = indexer
+            .index_file_changes(
+                vec![readme.clone()],
+                vec![cargo.to_string_lossy().into_owned()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.roots_scanned, 0);
+        assert_eq!(report.text_files_indexed, 1);
+        assert_eq!(report.file_chunks_indexed, 1);
+
+        let chunks = database.file_chunk_matches().await.unwrap();
+        assert!(chunks.iter().any(|chunk| chunk.content.contains("changed")));
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| chunk.is_current && chunk.file_path == cargo.to_string_lossy())
         );
     }
 
@@ -346,5 +430,35 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[derive(Debug)]
+    struct CountingEmbedder {
+        dimensions: usize,
+        document_batch_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingEmbedder {
+        fn new(dimensions: usize) -> Self {
+            Self {
+                dimensions,
+                document_batch_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Embedder for CountingEmbedder {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn embed(&self, _text: &str) -> crate::embed::Result<Vec<f32>> {
+            Ok(vec![1.0; self.dimensions])
+        }
+
+        fn embed_documents(&self, texts: &[String]) -> crate::embed::Result<Vec<Vec<f32>>> {
+            self.document_batch_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![vec![1.0; self.dimensions]; texts.len()])
+        }
     }
 }

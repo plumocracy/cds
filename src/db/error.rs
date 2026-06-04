@@ -74,10 +74,31 @@ pub enum DbError {
         source: sqlx::Error,
     },
 
+    #[error("failed to delete indexed file {path}")]
+    DeleteFile {
+        path: String,
+        #[source]
+        source: sqlx::Error,
+    },
+
     #[error("failed to insert indexed chunk {path}#{chunk_index}")]
     InsertFileChunk {
         path: String,
         chunk_index: u32,
+        #[source]
+        source: sqlx::Error,
+    },
+
+    #[error("failed to insert historical indexed chunk {path}#{chunk_index}")]
+    InsertFileChunkHistory {
+        path: String,
+        chunk_index: u32,
+        #[source]
+        source: sqlx::Error,
+    },
+
+    #[error("failed to commit indexed file batch")]
+    CommitFileBatch {
         #[source]
         source: sqlx::Error,
     },
@@ -106,6 +127,18 @@ pub enum DbError {
 
     #[error("failed to reset database content")]
     ResetDatabase {
+        #[source]
+        source: sqlx::Error,
+    },
+
+    #[error("failed to read index revision")]
+    ReadIndexRevision {
+        #[source]
+        source: sqlx::Error,
+    },
+
+    #[error("failed to bump index revision")]
+    BumpIndexRevision {
         #[source]
         source: sqlx::Error,
     },

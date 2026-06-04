@@ -14,10 +14,11 @@ fn install_script_writes_shell_integration_idempotently() {
     fs::write(
         &fake_cargo,
         format!(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{}'\nmkdir -p '{}'\ntouch '{}/cds'\nchmod +x '{}/cds'\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{}'\nmkdir -p '{}'\ncat > '{}/cds' <<'CDS'\n#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"${{1-}}\" = \"--daemon\" ]; then sleep 60; fi\nCDS\nchmod +x '{}/cds'\n",
             temp.path().join("cargo-args.log").display(),
             cargo_home.join("bin").display(),
             cargo_home.join("bin").display(),
+            temp.path().join("cds-args.log").display(),
             cargo_home.join("bin").display(),
         ),
     )
@@ -51,6 +52,9 @@ fn install_script_writes_shell_integration_idempotently() {
 
     let cargo_args = fs::read_to_string(temp.path().join("cargo-args.log")).unwrap();
     assert_eq!(cargo_args.matches("--force").count(), 0);
+
+    let cds_args = fs::read_to_string(temp.path().join("cds-args.log")).unwrap();
+    assert_eq!(cds_args.matches("--restart-daemon").count(), 2);
 }
 
 #[test]
@@ -65,10 +69,11 @@ fn install_script_force_passes_force_to_cargo_install() {
     fs::write(
         &fake_cargo,
         format!(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > '{}'\nmkdir -p '{}'\ntouch '{}/cds'\nchmod +x '{}/cds'\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > '{}'\nmkdir -p '{}'\ncat > '{}/cds' <<'CDS'\n#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"${{1-}}\" = \"--daemon\" ]; then sleep 60; fi\nCDS\nchmod +x '{}/cds'\n",
             temp.path().join("cargo-args.log").display(),
             cargo_home.join("bin").display(),
             cargo_home.join("bin").display(),
+            temp.path().join("cds-args.log").display(),
             cargo_home.join("bin").display(),
         ),
     )
@@ -97,4 +102,6 @@ fn install_script_force_passes_force_to_cargo_install() {
     let cargo_args = fs::read_to_string(temp.path().join("cargo-args.log")).unwrap();
     assert!(cargo_args.contains("install --path"));
     assert!(cargo_args.contains("--force"));
+    let cds_args = fs::read_to_string(temp.path().join("cds-args.log")).unwrap();
+    assert!(cds_args.contains("--restart-daemon"));
 }

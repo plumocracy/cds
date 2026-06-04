@@ -13,6 +13,7 @@ use cds::app;
 use cds::cli::{Invocation, parse_invocation};
 use cds::index::IndexProgress;
 use cds::{error, shell_init};
+use chrono::{Local, TimeZone};
 use color_eyre::eyre::{Result, WrapErr};
 
 #[tokio::main]
@@ -47,10 +48,21 @@ fn install_error_reporter() -> Result<()> {
 
 async fn run(invocation: Invocation) -> error::Result<()> {
     match invocation {
+        Invocation::Daemon { run_once } => {
+            if run_once {
+                app::daemon_once().await?;
+            } else {
+                app::daemon().await?;
+            }
+        }
         Invocation::DirectoryTypeCount => {
             for count in app::directory_type_counts().await? {
                 println!("{}\t{}", count.count, count.label);
             }
+        }
+        Invocation::DryRun { query } => {
+            let report = app::dry_run(query, 10).await?;
+            print_dry_run(report);
         }
         Invocation::EmitCd { args } => {
             let mut animation = app::implied_search_query(&args)
@@ -65,12 +77,12 @@ async fn run(invocation: Invocation) -> error::Result<()> {
         }
         Invocation::ShellInit { shell } => write_stdout(shell_init(shell).as_bytes())?,
         Invocation::Init => {
+            let mut init_progress = TerminalInitProgress::start();
             let mut progress = TerminalIndexProgress::start();
-            let report = app::init_with_progress(&mut progress).await?;
+            let report =
+                app::init_with_progress_and_steps(&mut progress, &mut init_progress).await?;
             progress.finish();
-            println!("config ready: {}", report.config_file.display());
-            println!("database ready: {}", report.database_file.display());
-            println!("{}", report.index.human_summary());
+            init_progress.finish(&report);
         }
         Invocation::Index { roots } => {
             let mut progress = TerminalIndexProgress::start();
@@ -86,6 +98,12 @@ async fn run(invocation: Invocation) -> error::Result<()> {
                 println!("reset cancelled");
             }
         }
+        Invocation::RestartDaemon => {
+            let report = app::restart_daemon()?;
+            println!("killed {} cds daemon(s)", report.killed_daemons);
+            println!("started cds daemon with pid {}", report.pid);
+            println!("daemon log: {}", report.log_file.display());
+        }
         Invocation::Search { query } => {
             let mut animation = SearchAnimation::start();
             let results = app::search(query, 10).await;
@@ -99,6 +117,103 @@ async fn run(invocation: Invocation) -> error::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_dry_run(report: cds::search::SearchDryRun) {
+    println!("query: {}", report.query);
+    println!();
+
+    println!("directory cache:");
+    println!("  status: {}", report.cache.status.as_str());
+    println!("  directories: {}", report.cache.directory_count);
+    println!();
+
+    println!("temporal parse:");
+    match &report.temporal.matched_phrase {
+        Some(phrase) => println!("  matched phrase: {phrase}"),
+        None => println!("  matched phrase: (none)"),
+    }
+    println!("  cleaned query: {}", report.temporal.cleaned_query);
+    println!("  semantic query: {}", report.temporal.semantic_query);
+    print_temporal_bound("  modified start", report.temporal.start_unix_seconds);
+    print_temporal_bound("  modified end", report.temporal.end_unix_seconds);
+    println!();
+
+    print_string_section("candidate terms", &report.candidate_terms);
+    print_string_section(
+        "sql directory candidates",
+        &report.sql_candidate_directories,
+    );
+    print_string_section(
+        "fuzzy/partial directory candidates added",
+        &report.fuzzy_candidate_directories,
+    );
+
+    println!("embedding scores ({}):", report.embedding_scores.len());
+    if report.embedding_scores.is_empty() {
+        println!("  (none)");
+    } else {
+        for score in &report.embedding_scores {
+            let state = if score.is_current {
+                "current"
+            } else {
+                "history"
+            };
+            println!(
+                "  {:.6}\t{}\tdir={}\tfile={}\t{}",
+                score.cosine_score,
+                state,
+                score.directory_path,
+                score.file_path,
+                score.content_preview
+            );
+        }
+    }
+    println!();
+
+    println!("final scores ({}):", report.results.len());
+    if report.results.is_empty() {
+        println!("  (none)");
+    } else {
+        for result in &report.results {
+            println!("  {:.3}\t{}", result.score, result.path);
+        }
+    }
+    println!();
+
+    println!("winner:");
+    if let Some(winner) = report.results.first() {
+        println!("  {:.3}\t{}", winner.score, winner.path);
+    } else {
+        println!("  (none)");
+    }
+}
+
+fn print_temporal_bound(label: &str, value: Option<i64>) {
+    match value {
+        Some(value) => println!("{label}: {value} ({})", format_unix_seconds(value)),
+        None => println!("{label}: (none)"),
+    }
+}
+
+fn format_unix_seconds(value: i64) -> String {
+    Local
+        .timestamp_opt(value, 0)
+        .single()
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+        .unwrap_or_else(|| "invalid local time".to_string())
+}
+
+fn print_string_section(label: &str, values: &[String]) {
+    println!("{label} ({}):", values.len());
+    if values.is_empty() {
+        println!("  (none)");
+    } else {
+        for value in values {
+            println!("  {value}");
+        }
+    }
+    println!();
 }
 
 fn write_stdout(bytes: &[u8]) -> error::Result<()> {
@@ -122,7 +237,102 @@ fn confirm_reset() -> error::Result<bool> {
     ))
 }
 
-const SEARCH_LABEL: &str = "Searching";
+struct TerminalInitProgress {
+    step: usize,
+}
+
+impl TerminalInitProgress {
+    const STEP_COUNT: usize = 5;
+
+    fn start() -> Self {
+        println!("cds init");
+        flush_stdout();
+        Self { step: 0 }
+    }
+
+    fn begin(&mut self, label: &str) {
+        self.step += 1;
+        println!("[{}/{}] {label}", self.step, Self::STEP_COUNT);
+        flush_stdout();
+    }
+
+    fn detail(label: &str, value: impl std::fmt::Display) {
+        println!("      {label}: {value}");
+        flush_stdout();
+    }
+
+    fn status(label: &str, path: &Path, created: bool) {
+        let action = if created { "created" } else { "ready" };
+        Self::detail(label, format_args!("{action} {}", path.display()));
+    }
+
+    fn finish(&mut self, report: &app::InitReport) {
+        Self::detail("index", report.index.human_summary());
+        Self::detail("config", report.config_file.display());
+        Self::detail("database", report.database_file.display());
+        println!("cds init complete");
+        flush_stdout();
+    }
+}
+
+impl app::InitProgress for TerminalInitProgress {
+    fn paths_started(&mut self) {
+        self.begin("Resolve cds directories");
+    }
+
+    fn paths_ready(&mut self, config_dir: &Path, data_dir: &Path, cache_dir: &Path) {
+        Self::detail("config dir", config_dir.display());
+        Self::detail("data dir", data_dir.display());
+        Self::detail("cache dir", cache_dir.display());
+    }
+
+    fn config_started(&mut self, path: &Path) {
+        self.begin("Prepare config");
+        Self::detail("path", path.display());
+    }
+
+    fn config_ready(&mut self, path: &Path, created: bool) {
+        Self::status("config", path, created);
+    }
+
+    fn database_started(&mut self, path: &Path) {
+        self.begin("Prepare database");
+        Self::detail("path", path.display());
+    }
+
+    fn database_ready(&mut self, path: &Path, created: bool) {
+        Self::status("database", path, created);
+    }
+
+    fn model_started(&mut self, cache_dir: &Path) {
+        self.begin("Load embedding model");
+        Self::detail("model", "BAAI/bge-small-en-v1.5");
+        Self::detail("cache", cache_dir.join("models").display());
+    }
+
+    fn model_ready(&mut self, _cache_dir: &Path) {
+        Self::detail("model", "ready");
+    }
+
+    fn index_started(&mut self, roots: &[String]) {
+        self.begin("Index configured roots");
+        let roots = if roots.is_empty() {
+            "<none>".to_string()
+        } else {
+            roots.join(", ")
+        };
+        Self::detail("roots", roots);
+    }
+}
+
+fn flush_stdout() {
+    let _ = io::stdout().flush();
+}
+
+const SEARCH_LABEL: &str = "Searching..";
+const SEARCH_SPINNER_COLOR: &str = "\x1b[32m";
+const SEARCH_SPINNER_RESET: &str = "\x1b[0m";
+const SEARCH_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 struct SearchAnimation {
     stop: Arc<AtomicBool>,
@@ -162,7 +372,7 @@ fn spawn_search_animation(stop: Arc<AtomicBool>) -> JoinHandle<()> {
         while !stop.load(Ordering::Relaxed) {
             render_search_frame(tick);
             tick = tick.wrapping_add(1);
-            thread::sleep(Duration::from_millis(120));
+            thread::sleep(Duration::from_millis(160));
         }
 
         clear_search_frame();
@@ -180,8 +390,8 @@ fn clear_search_frame() {
 }
 
 fn search_frame(tick: usize) -> String {
-    let dots = ".".repeat((tick % 3) + 1);
-    format!("{SEARCH_LABEL}{dots}")
+    let frame = SEARCH_SPINNER_FRAMES[tick % SEARCH_SPINNER_FRAMES.len()];
+    format!("{SEARCH_SPINNER_COLOR}{frame}{SEARCH_SPINNER_RESET} {SEARCH_LABEL}")
 }
 
 #[derive(Debug, Default)]
@@ -195,18 +405,21 @@ struct TerminalIndexProgress {
     state: Arc<Mutex<ProgressState>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    enabled: bool,
 }
 
 impl TerminalIndexProgress {
     fn start() -> Self {
         let state = Arc::new(Mutex::new(ProgressState::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = Some(spawn_progress_worker(Arc::clone(&state), Arc::clone(&stop)));
+        let enabled = io::stderr().is_terminal();
+        let worker = enabled.then(|| spawn_progress_worker(Arc::clone(&state), Arc::clone(&stop)));
 
         Self {
             state,
             stop,
             worker,
+            enabled,
         }
     }
 
@@ -226,11 +439,19 @@ impl Drop for TerminalIndexProgress {
 
 impl IndexProgress for TerminalIndexProgress {
     fn directory_started(&mut self, directory: &Path) {
+        self.status(&directory.display().to_string());
+    }
+
+    fn status(&mut self, message: &str) {
+        if !self.enabled {
+            return;
+        }
+
         let Ok(mut state) = self.state.lock() else {
             return;
         };
 
-        state.current_directory = Some(directory.display().to_string());
+        state.current_directory = Some(message.to_string());
         state.tick = 0;
         render_progress_line(&mut state);
     }
@@ -280,10 +501,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_frame_cycles_dots() {
-        assert_eq!(search_frame(0), "Searching.");
-        assert_eq!(search_frame(1), "Searching..");
-        assert_eq!(search_frame(2), "Searching...");
-        assert_eq!(search_frame(3), "Searching.");
+    fn search_frame_cycles_dot_spinner() {
+        assert_eq!(search_frame(0), "\x1b[32m⠋\x1b[0m Searching..");
+        assert_eq!(search_frame(1), "\x1b[32m⠙\x1b[0m Searching..");
+        assert_eq!(search_frame(9), "\x1b[32m⠏\x1b[0m Searching..");
+        assert_eq!(search_frame(10), "\x1b[32m⠋\x1b[0m Searching..");
     }
 }

@@ -34,17 +34,40 @@ impl BgeSmallEmbedder {
     }
 
     fn embed_prefixed(&self, prefix: &str, text: &str) -> Result<Vec<f32>> {
-        let input = format!("{prefix}: {text}");
-        let mut model = self.model.lock().map_err(|_| EmbedError::Lock)?;
-        let mut embeddings = model
-            .embed([input], None)
-            .map_err(|source| EmbedError::Model {
-                message: source.to_string(),
-            })?;
+        let mut embeddings = self.embed_prefixed_batch(prefix, &[text.to_string()])?;
 
         embeddings.pop().ok_or_else(|| EmbedError::Model {
             message: "embedding model returned no vectors".to_string(),
         })
+    }
+
+    fn embed_prefixed_batch(&self, prefix: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let inputs = texts
+            .iter()
+            .map(|text| format!("{prefix}: {text}"))
+            .collect::<Vec<_>>();
+        let mut model = self.model.lock().map_err(|_| EmbedError::Lock)?;
+        let embeddings = model
+            .embed(inputs, None)
+            .map_err(|source| EmbedError::Model {
+                message: source.to_string(),
+            })?;
+
+        if embeddings.len() != texts.len() {
+            return Err(EmbedError::Model {
+                message: format!(
+                    "embedding model returned {} vectors for {} inputs",
+                    embeddings.len(),
+                    texts.len()
+                ),
+            });
+        }
+
+        Ok(embeddings)
     }
 }
 
@@ -59,6 +82,10 @@ impl Embedder for BgeSmallEmbedder {
 
     fn embed_document(&self, text: &str) -> Result<Vec<f32>> {
         self.embed_prefixed("passage", text)
+    }
+
+    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed_prefixed_batch("passage", texts)
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
