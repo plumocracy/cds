@@ -1,0 +1,17 @@
+{
+  "label": "rust project",
+  "rules": [
+    {
+      "id": "cargo_toml_package",
+      "confidence": 0.98,
+      "evidence_summary": "Cargo.toml contains [package] or [workspace]",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "Cargo.toml",
+          "contains_any": ["[package]", "[workspace]"]
+        }
+      ]
+    }
+  ]
+}

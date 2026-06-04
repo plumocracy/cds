@@ -1,0 +1,21 @@
+{
+  "label": "python project",
+  "rules": [
+    {
+      "id": "pyproject_toml",
+      "confidence": 0.92,
+      "evidence_summary": "pyproject.toml exists",
+      "signals": [
+        { "kind": "file_exists", "path": "pyproject.toml" }
+      ]
+    },
+    {
+      "id": "requirements_txt",
+      "confidence": 0.85,
+      "evidence_summary": "requirements.txt exists",
+      "signals": [
+        { "kind": "file_exists", "path": "requirements.txt" }
+      ]
+    }
+  ]
+}

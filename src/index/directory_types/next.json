@@ -1,0 +1,28 @@
+{
+  "label": "next.js app",
+  "rules": [
+    {
+      "id": "next_dependency",
+      "confidence": 0.95,
+      "evidence_summary": "package.json references Next.js",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_any": ["\"next\""]
+        }
+      ]
+    },
+    {
+      "id": "next_config",
+      "confidence": 0.95,
+      "evidence_summary": "next.config file exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "starts_with_any": ["next.config"]
+        }
+      ]
+    }
+  ]
+}
