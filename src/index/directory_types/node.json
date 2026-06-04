@@ -1,0 +1,21 @@
+{
+  "label": "node project",
+  "rules": [
+    {
+      "id": "package_json",
+      "confidence": 0.9,
+      "evidence_summary": "package.json contains scripts or dependencies",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_any": [
+            "\"scripts\"",
+            "\"dependencies\"",
+            "\"devDependencies\""
+          ]
+        }
+      ]
+    }
+  ]
+}

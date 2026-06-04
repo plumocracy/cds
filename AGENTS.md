@@ -44,15 +44,17 @@ Prefer stable, well-maintained crates:
 
 For embeddings, prefer an implementation path that keeps the tool locally usable:
 
-- Use `bge-small-en-v1.5` through a local model runtime such as ONNX Runtime, Candle, or
-  another Rust-friendly inference backend.
+- Use `BAAI/bge-small-en-v1.5` through FastEmbed/ONNX for production text embeddings.
 - Do not introduce a hosted embedding API as the default path.
 - If model download/setup is needed, make it explicit and cache model files outside the
   repo in a user cache directory.
+- Keep deterministic fake embeddings available for normal tests with `CDS_EMBEDDER=fake`.
 
 ## Suggested Architecture
 
 Keep the code split between a thin binary and testable library modules.
+The CLI and application pipeline are async end to end; use `tokio` for the binary runtime
+and keep database access on SQLx async APIs.
 
 Suggested modules:
 
@@ -69,6 +71,7 @@ Keep business logic out of `main.rs`.
 ## SQLite Guidance
 
 SQLite should be the durable source of indexed data.
+Schema changes belong in top-level SQLx migration files under `migrations/`.
 
 Track at least:
 
@@ -92,21 +95,26 @@ Embedding storage options may include:
 If using a SQLite extension, preserve a fallback or clear setup error so the CLI does not
 fail opaquely.
 
-## Command Shape
+## Current Command Shape
 
-Likely commands:
+All explicit `cds` commands should be long flags so they cannot be confused with normal
+`cd` operands. Do not add bare subcommands such as `cds init`; those should remain valid
+directory names when routed through the shell integration.
+
+Current user-facing commands:
 
 ```sh
-cds init
-cds index [PATH]
-cds search QUERY...
-cds go QUERY...
-cds explain QUERY...
-cds doctor
+cds --init
+cds --index [PATH...]
+cds --search QUERY...
+cds --dir-type-count
+cds --reset
+cds --shell-init [bash|zsh]
 ```
 
-Shell integration should make the common path concise. For example, the installed shell
-function may call `cds go "$@"` and `cd` to the emitted path.
+The shell integration makes the common path concise. Plain invocations such as
+`cds Projects` should preserve `cd` behavior unless they are clearly semantic searches.
+The hidden shell-machine mode currently uses `--cds-emit`.
 
 The Rust binary should not print human-oriented decoration in machine-readable shell
 integration mode. Keep stdout parseable and put diagnostics on stderr.
@@ -166,9 +174,26 @@ Add tests for:
 - indexing change detection
 - ranking behavior with deterministic fake embeddings
 - shell integration output
+- Docker-backed `cd` equivalence for Bash behavior
 
 Do not make tests depend on downloading or running the real embedding model unless they
 are explicitly marked as slow/integration tests. Use a fake embedder for normal tests.
+
+The Docker equivalence test runs the project inside a Rust container and compares `cds`
+against Bash's built-in `cd` for status, stdout, stderr, `PWD`, `OLDPWD`, and physical path.
+Keep these details in mind when editing it:
+
+- CI currently uses `CDS_DOCKER_IMAGE=rust:1`.
+- The Docker image must include Cargo and C++ standard library/linker support. The
+  FastEmbed/ONNX dependency links against `libstdc++`, so very small images such as
+  `rust:1-slim` can fail with `unable to find library -lstdc++`.
+- The test runner must explicitly add `/usr/local/cargo/bin` to `PATH`; some container
+  invocations otherwise fail with `cargo: command not found`.
+- Bash includes source line numbers in `cd` diagnostics. Normalize only those line numbers
+  before comparing stderr, while keeping the actual diagnostic text exact.
+- The Docker test can skip locally when Docker is unavailable, so use
+  `CDS_DOCKER_IMAGE=rust:1 cargo test --test docker_cd_equivalence -- --nocapture`
+  with Docker access when changing equivalence behavior.
 
 ## Repository Hygiene
 

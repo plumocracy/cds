@@ -33,10 +33,19 @@ fn run_shell_cd_smoke_test(shell: &str, init_shell: &str) {
         r#"
 set -e
 eval "$("{bin}" --shell-init {init_shell})"
+eval "$(cds --shell-init {init_shell})"
 
 tmp="$(mktemp -d)"
-mkdir -p "$tmp/a/b" "$tmp/cpath/d"
+mkdir -p "$tmp/a/b" "$tmp/cpath/d" "$tmp/search" "$tmp/index"
 ln -s "$tmp/a" "$tmp/linka"
+
+cd "$tmp"
+cds search
+[ "$(pwd -P)" = "$(cd "$tmp/search" && pwd -P)" ]
+
+cd "$tmp"
+cds index
+[ "$(pwd -P)" = "$(cd "$tmp/index" && pwd -P)" ]
 
 cd "$tmp/a"
 cds "$tmp/linka/b"
@@ -59,6 +68,13 @@ cd "$tmp/cpath" >/dev/null
 cds - >/dev/null
 expected="$(cd "$tmp/a" && pwd -P)"
 [ "$(pwd -P)" = "$expected" ]
+
+home="$tmp/home"
+mkdir -p "$home/Projects/cli-init-test"
+printf 'shell integration init project\n' > "$home/Projects/cli-init-test/README.md"
+HOME="$home" CDS_EMBEDDER="fake" CDS_CONFIG_DIR="$tmp/config" CDS_DATA_DIR="$tmp/data" CDS_CACHE_DIR="$tmp/cache" cds --init >/tmp/cds-shell-init.out
+[ -f "$tmp/config/config.json" ]
+[ -f "$tmp/data/cds.sqlite" ]
 "#
     );
 

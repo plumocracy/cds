@@ -1,6 +1,13 @@
 use std::ffi::{OsStr, OsString};
 
+pub mod app;
 pub mod cli;
+pub mod config;
+pub mod db;
+pub mod embed;
+pub mod error;
+pub mod index;
+pub mod search;
 
 pub fn emit_cd_script(args: &[OsString]) -> Vec<u8> {
     let request = CdRequest::new(args.to_vec());
@@ -77,7 +84,14 @@ const BASH_ZSH_INIT: &str = r#"cds() {
     local __cds_script
     local __cds_status
 
-    __cds_script="$(command cds __cds_emit -- "$@")"
+    case "${1-}" in
+        --dir-type-count|--init|--index|--reset|--search|--help|-h|--version|-V|--shell-init)
+            command cds "$@"
+            return $?
+            ;;
+    esac
+
+    __cds_script="$(command cds --cds-emit -- "$@")"
     __cds_status=$?
     if [ "$__cds_status" -ne 0 ]; then
         return "$__cds_status"

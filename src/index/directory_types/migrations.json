@@ -1,0 +1,28 @@
+{
+  "label": "database migrations",
+  "rules": [
+    {
+      "id": "directory_name",
+      "confidence": 0.95,
+      "evidence_summary": "directory name is migrations",
+      "signals": [
+        {
+          "kind": "directory_name",
+          "equals_any": ["migrations", "migration"]
+        }
+      ]
+    },
+    {
+      "id": "migration_file_names",
+      "confidence": 0.75,
+      "evidence_summary": "directory contains SQL or migration-like file names",
+      "signals": [
+        {
+          "kind": "child_name",
+          "contains_any": ["migration"],
+          "ends_with_any": [".sql"]
+        }
+      ]
+    }
+  ]
+}

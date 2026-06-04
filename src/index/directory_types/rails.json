@@ -1,0 +1,18 @@
+{
+  "label": "rails app",
+  "rules": [
+    {
+      "id": "gemfile_routes",
+      "confidence": 0.98,
+      "evidence_summary": "Gemfile mentions Rails and config/routes.rb exists",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "Gemfile",
+          "contains_any": ["rails"]
+        },
+        { "kind": "file_exists", "path": "config/routes.rb" }
+      ]
+    }
+  ]
+}
