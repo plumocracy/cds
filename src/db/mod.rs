@@ -1335,7 +1335,7 @@ async fn migrate_pool(pool: &SqlitePool) -> Result<()> {
         .run(pool)
         .await
         .map_err(|source| DbError::Migrate { source })?;
-    sqlx::query("PRAGMA user_version = 6")
+    sqlx::query("PRAGMA user_version = 7")
         .execute(pool)
         .await
         .map_err(|source| DbError::PrepareLegacyMigration { source })?;
@@ -1750,7 +1750,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(db.current_revision().await.unwrap(), 0);
         db.upsert_document(&IndexedDocument {
             path: "/tmp/project".to_string(),
