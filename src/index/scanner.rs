@@ -404,8 +404,12 @@ fn worker_loop(
         match result {
             Ok(output) => finish_scan_job(&queue, &scan, output),
             Err(source) => {
-                *error.lock().expect("scan error lock is poisoned") = Some(source);
-                stop_scan_workers(&queue);
+                if is_permission_denied(&source) {
+                    finish_skipped_job(&queue, &scan);
+                } else {
+                    *error.lock().expect("scan error lock is poisoned") = Some(source);
+                    stop_scan_workers(&queue);
+                }
                 return;
             }
         }
@@ -458,6 +462,31 @@ fn stop_scan_workers(queue: &ScanQueue) {
     state.stopped = true;
     state.pending.clear();
     queue.changed.notify_all();
+}
+
+fn finish_skipped_job(queue: &ScanQueue, scan: &Mutex<ConcurrentScan>) {
+    {
+        let mut scan = scan.lock().expect("scan result lock is poisoned");
+        scan.report.entries_skipped += 1;
+    }
+    let mut state = queue.state.lock().expect("scan queue lock is poisoned");
+    state.active = state.active.saturating_sub(1);
+    queue.changed.notify_all();
+}
+
+fn is_permission_denied(error: &IndexError) -> bool {
+    match error {
+        IndexError::SummarizeDirectory { source, .. } => is_permission_denied(source),
+        IndexError::ReadDirectory { source, .. }
+        | IndexError::ReadMetadata { source, .. }
+        | IndexError::ReadDirectoryEntry { source, .. }
+        | IndexError::ReadFileType { source, .. }
+        | IndexError::StatFile { source, .. }
+        | IndexError::ReadFile { source, .. } => {
+            source.kind() == std::io::ErrorKind::PermissionDenied
+        }
+        _ => false,
+    }
 }
 
 fn scan_directory_job(job: &ScanJob, settings: &Settings) -> Result<ScanOutput> {
