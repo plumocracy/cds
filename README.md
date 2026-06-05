@@ -75,12 +75,20 @@ Create the default config and SQLite database, then index the configured roots:
 cds --init
 ```
 
-By default this creates:
+Create only the default config without creating the database, loading the model, or scanning:
+
+```sh
+cds --init-config
+```
+
+By default `--init` creates:
 
 ```text
 ~/.config/cds/config.json
 ~/.local/share/cds/cds.sqlite
 ```
+
+`--init-config` creates only `~/.config/cds/config.json`.
 
 The initial config looks like this:
 

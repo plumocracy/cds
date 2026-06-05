@@ -2,6 +2,35 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
+fn init_config_writes_config_without_database_or_indexing() {
+    let fixture = SearchFixture::new();
+
+    let output = fixture.cds().arg("--init-config").output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("created config:"), "{stdout}");
+    assert!(fixture.temp.path().join("config/config.json").exists());
+    assert!(!fixture.temp.path().join("data/cds.sqlite").exists());
+
+    let second = fixture.cds().arg("--init-config").output().unwrap();
+    assert!(
+        second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        String::from_utf8(second.stdout)
+            .unwrap()
+            .contains("config already exists:"),
+    );
+}
+
+#[test]
 fn hidden_emit_searches_when_local_prefix_is_absent() {
     let fixture = SearchFixture::new();
     fixture.init();

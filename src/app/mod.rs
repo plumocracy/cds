@@ -32,6 +32,12 @@ pub struct InitReport {
     pub index: IndexReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitConfigReport {
+    pub config_file: PathBuf,
+    pub created: bool,
+}
+
 pub trait InitProgress {
     fn paths_started(&mut self) {}
     fn paths_ready(&mut self, _config_dir: &Path, _data_dir: &Path, _cache_dir: &Path) {}
@@ -99,6 +105,17 @@ where
         config_file: paths.config_file,
         database_file: paths.database_file,
         index,
+    })
+}
+
+pub fn init_config() -> Result<InitConfigReport> {
+    let paths = AppPaths::discover()?;
+    let created = !paths.config_file.exists();
+    Settings::load_or_create(&paths.config_file)?;
+
+    Ok(InitConfigReport {
+        config_file: paths.config_file,
+        created,
     })
 }
 

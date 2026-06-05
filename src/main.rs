@@ -84,6 +84,14 @@ async fn run(invocation: Invocation) -> error::Result<()> {
             progress.finish();
             init_progress.finish(&report);
         }
+        Invocation::InitConfig => {
+            let report = app::init_config()?;
+            if report.created {
+                println!("created config: {}", report.config_file.display());
+            } else {
+                println!("config already exists: {}", report.config_file.display());
+            }
+        }
         Invocation::Index { roots } => {
             let mut progress = TerminalIndexProgress::start();
             let report = app::index_with_progress(roots, &mut progress).await?;

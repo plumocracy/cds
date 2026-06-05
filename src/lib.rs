@@ -95,7 +95,7 @@ const BASH_ZSH_INIT: &str = r#"cds() {
     local __cds_status
 
     case "${1-}" in
-        --daemon|--dir-type-count|--init|--index|--reset|--restart-daemon|--search|--help|-h|--version|-V|--shell-init)
+        --daemon|--dir-type-count|--init|--init-config|--index|--reset|--restart-daemon|--search|--help|-h|--version|-V|--shell-init)
             command cds "$@"
             return $?
             ;;

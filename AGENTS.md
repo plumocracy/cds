@@ -105,6 +105,7 @@ Current user-facing commands:
 
 ```sh
 cds --init
+cds --init-config
 cds --daemon
 cds --index [PATH...]
 cds --search QUERY...

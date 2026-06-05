@@ -12,6 +12,7 @@ pub enum Invocation {
     EmitCd { args: Vec<OsString> },
     Index { roots: Vec<OsString> },
     Init,
+    InitConfig,
     Reset,
     RestartDaemon,
     Search { query: Vec<OsString> },
@@ -87,6 +88,10 @@ pub fn parse_invocation(
         return Ok(Invocation::Init);
     }
 
+    if matches.get_flag("init-config") {
+        return Ok(Invocation::InitConfig);
+    }
+
     if matches.get_flag("reset") {
         return Ok(Invocation::Reset);
     }
@@ -136,6 +141,7 @@ pub fn command() -> Command {
             "emit-cd",
             "index",
             "init",
+            "init-config",
             "reset",
             "restart-daemon",
             "search",
@@ -162,6 +168,26 @@ pub fn command() -> Command {
                     "dry-run",
                     "emit-cd",
                     "index",
+                    "init-config",
+                    "reset",
+                    "restart-daemon",
+                    "search",
+                    "shell-init",
+                ])
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("init-config")
+                .long("init-config")
+                .help("Create the default config without creating the database or indexing")
+                .conflicts_with_all([
+                    "daemon",
+                    "daemon-once",
+                    "dir-type-count",
+                    "dry-run",
+                    "emit-cd",
+                    "index",
+                    "init",
                     "reset",
                     "restart-daemon",
                     "search",
@@ -178,6 +204,7 @@ pub fn command() -> Command {
                     "emit-cd",
                     "index",
                     "init",
+                    "init-config",
                     "reset",
                     "search",
                     "shell-init",
@@ -194,6 +221,7 @@ pub fn command() -> Command {
                     "emit-cd",
                     "index",
                     "init",
+                    "init-config",
                     "restart-daemon",
                     "search",
                     "shell-init",
@@ -212,6 +240,7 @@ pub fn command() -> Command {
                     "emit-cd",
                     "index",
                     "init",
+                    "init-config",
                     "reset",
                     "search",
                     "shell-init",
@@ -236,6 +265,7 @@ pub fn command() -> Command {
                     "emit-cd",
                     "index",
                     "init",
+                    "init-config",
                     "reset",
                     "restart-daemon",
                     "search",
@@ -256,6 +286,7 @@ pub fn command() -> Command {
                     "dir-type-count",
                     "dry-run",
                     "emit-cd",
+                    "init-config",
                     "init",
                     "reset",
                     "restart-daemon",
@@ -275,6 +306,7 @@ pub fn command() -> Command {
                     "emit-cd",
                     "index",
                     "init",
+                    "init-config",
                     "reset",
                     "restart-daemon",
                     "search",
@@ -312,6 +344,7 @@ pub fn command() -> Command {
                     "dry-run",
                     "index",
                     "init",
+                    "init-config",
                     "reset",
                     "search",
                     "shell-init",
@@ -370,6 +403,14 @@ mod tests {
     #[test]
     fn parses_init() {
         assert_eq!(parse_invocation([os("--init")]).unwrap(), Invocation::Init);
+    }
+
+    #[test]
+    fn parses_init_config() {
+        assert_eq!(
+            parse_invocation([os("--init-config")]).unwrap(),
+            Invocation::InitConfig
+        );
     }
 
     #[test]
