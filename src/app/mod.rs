@@ -1050,6 +1050,7 @@ fn is_explicit_cds_command(args: &[OsString]) -> bool {
             | "--help"
             | "--index"
             | "--init"
+            | "--init-config"
             | "--reset"
             | "--restart-daemon"
             | "--search"
@@ -1342,6 +1343,10 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_cds_commands_are_emitted_as_commands() {
+        assert_eq!(
+            resolve_cd_script(vec![os("--init-config")]).await,
+            b"command cds '--init-config'\n"
+        );
         assert_eq!(
             resolve_cd_script(vec![os("--restart-daemon")]).await,
             b"command cds '--restart-daemon'\n"

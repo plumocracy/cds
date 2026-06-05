@@ -464,6 +464,16 @@ mod tests {
     }
 
     #[test]
+    fn hidden_emit_preserves_init_config_flag() {
+        assert_eq!(
+            parse_invocation([os("--cds-emit"), os("--"), os("--init-config")]).unwrap(),
+            Invocation::EmitCd {
+                args: vec![os("--init-config")]
+            }
+        );
+    }
+
+    #[test]
     fn index_word_is_cd_input_inside_hidden_emit() {
         assert_eq!(
             parse_invocation([os("--cds-emit"), os("--"), os("index")]).unwrap(),
