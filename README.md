@@ -1,7 +1,5 @@
 # cds
 
-[Demo video](assets/cds-demo.mov)
-
 `cds` is a `cd` replacement with semantic directory search.
 
 `cds` has full `cd` compatibility via a passthrough. You can use `cds` exactly like
