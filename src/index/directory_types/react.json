@@ -1,0 +1,24 @@
+{
+  "label": "react app",
+  "rules": [
+    {
+      "id": "react_with_build_tool",
+      "confidence": 0.9,
+      "evidence_summary": "package.json references React and app build tooling",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_all": ["\"react\""],
+          "contains_any": [
+            "\"vite\"",
+            "\"next\"",
+            "\"react-scripts\"",
+            "\"@vitejs/plugin-react\"",
+            "\"webpack\""
+          ]
+        }
+      ]
+    }
+  ]
+}

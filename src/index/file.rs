@@ -81,7 +81,7 @@ pub fn prepare_text_file(
         .unwrap_or_else(|| OsStr::new(""))
         .to_string_lossy()
         .into_owned();
-    if !is_high_signal_content_file(&name) {
+    if !settings.index.is_high_signal_file_name(&name) {
         return Ok(None);
     }
 
@@ -184,38 +184,6 @@ fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn is_high_signal_content_file(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if lower.starts_with("readme") || lower == "gemfile" || lower == "dockerfile" {
-        return true;
-    }
-
-    matches!(
-        lower.as_str(),
-        "cargo.toml"
-            | "package.json"
-            | "manifest.json"
-            | "pyproject.toml"
-            | "requirements.txt"
-            | "setup.py"
-            | "go.mod"
-            | "makefile"
-            | "docker-compose.yml"
-            | "compose.yml"
-            | "compose.yaml"
-            | "tsconfig.json"
-            | "vite.config.js"
-            | "vite.config.ts"
-            | "next.config.js"
-            | "next.config.ts"
-            | "tailwind.config.js"
-            | "tailwind.config.ts"
-    ) || matches!(
-        lower.rsplit_once('.').map(|(_, extension)| extension),
-        Some("md" | "markdown" | "toml" | "yaml" | "yml" | "sql")
-    )
-}
-
 fn unix_seconds(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
@@ -248,10 +216,10 @@ mod tests {
     }
 
     #[test]
-    fn skips_low_signal_text_files() {
+    fn skips_files_outside_high_signal_allowlist() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("notes.txt");
-        fs::write(&path, "large low-signal notes").unwrap();
+        fs::write(&path, "personal notes").unwrap();
 
         let prepared = prepare_text_file(&path, temp.path(), &Settings::default()).unwrap();
 
@@ -281,5 +249,80 @@ mod tests {
 
         assert_eq!(prepared.file.name, "README.md");
         assert_eq!(prepared.chunks.len(), 1);
+    }
+
+    #[test]
+    fn prepares_project_descriptor_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("Cargo.toml");
+        fs::write(&path, "[package]\nname = \"cds\"").unwrap();
+
+        let prepared = prepare_text_file(&path, temp.path(), &Settings::default())
+            .unwrap()
+            .expect("Cargo.toml is indexed");
+
+        assert_eq!(prepared.file.name, "Cargo.toml");
+        assert_eq!(prepared.chunks.len(), 1);
+    }
+
+    #[test]
+    fn prepares_user_configured_high_signal_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ARCHITECTURE.md");
+        fs::write(&path, "system architecture notes").unwrap();
+        let settings = Settings {
+            index: crate::config::IndexSettings {
+                high_signal_files: vec!["ARCHITECTURE.md".to_string()],
+                ..crate::config::IndexSettings::default()
+            },
+            ..Settings::default()
+        };
+
+        let prepared = prepare_text_file(&path, temp.path(), &settings)
+            .unwrap()
+            .expect("ARCHITECTURE.md is allowed by config");
+
+        assert_eq!(prepared.file.name, "ARCHITECTURE.md");
+        assert_eq!(prepared.chunks.len(), 1);
+    }
+
+    #[test]
+    fn skips_source_code_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.rs");
+        fs::write(&path, "fn main() { println!(\"hello\"); }").unwrap();
+
+        let prepared = prepare_text_file(&path, temp.path(), &Settings::default()).unwrap();
+
+        assert_eq!(prepared, None);
+    }
+
+    #[test]
+    fn skips_code_like_config_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vite.config.ts");
+        fs::write(&path, "export default { plugins: [] }").unwrap();
+
+        let prepared = prepare_text_file(&path, temp.path(), &Settings::default()).unwrap();
+
+        assert_eq!(prepared, None);
+    }
+
+    #[test]
+    fn skips_generic_markdown_and_sql_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let notes = temp.path().join("ARCHITECTURE.md");
+        let schema = temp.path().join("schema.sql");
+        fs::write(&notes, "internal implementation notes").unwrap();
+        fs::write(&schema, "CREATE TABLE users (id INTEGER PRIMARY KEY);").unwrap();
+
+        assert_eq!(
+            prepare_text_file(&notes, temp.path(), &Settings::default()).unwrap(),
+            None
+        );
+        assert_eq!(
+            prepare_text_file(&schema, temp.path(), &Settings::default()).unwrap(),
+            None
+        );
     }
 }

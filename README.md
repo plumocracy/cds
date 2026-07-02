@@ -1,5 +1,7 @@
 # cds
 
+[Demo video](assets/cds-demo.mov)
+
 `cds` is a `cd` replacement with semantic directory search.
 
 `cds` has full `cd` compatibility via a passthrough. You can use `cds` exactly like
@@ -16,14 +18,17 @@ cds solves this problem.
 When you first download cds, you define directories that you'd like to index. `~/Projects` for example.
 
 When you then run `cds --init`, cds will scan all of the folders/files in those directories (excluding hidden directories
-and sensitive files) and generate embeddings for them that are stored in a local SQLite database. 
+and sensitive files) and generate embeddings for them that are stored in a local SQLite database. File chunk embeddings
+are also indexed in sqlite-vec virtual tables so semantic search can ask SQLite for nearest-neighbor candidates before
+the Rust ranking pass applies path, recency, and directory heuristics.
 
 When you later run `cds the chrome extension I worked on last month` cds will search that embeddings data to find
 the directory you're looking for and invoke cd to navigate you there. 
 
 #### Why not my entire system? 
 Embeddings get expensive fast and I have to use a very tiny model (bge-small-en-v1.5) to keep this lean.
-If we have a ton of parameteres in the database A: The db would be *huge* and B: The search would take a lot of time.
+If we have a ton of parameters in the database A: The db would be *huge* and B: The search would take a lot of time.
+sqlite-vec keeps query-time vector candidate retrieval from turning into a full Rust-side scan of every chunk embedding.
 
 ## Build
 
@@ -98,6 +103,13 @@ The initial config looks like this:
     "roots": ["~/Projects"],
     "exclude": [
       ".git",
+      "Applications",
+      "Library",
+      "Network",
+      "System",
+      "Volumes",
+      "cores",
+      "private",
       "node_modules",
       "target",
       "dist",
@@ -110,16 +122,22 @@ The initial config looks like this:
       "*.xcassets",
       "*.imageset",
       "*.appiconset",
-      "*.colorset",
-      "*.svg",
-      "*.png",
-      "*.jpg",
-      "*.jpeg",
-      "*.gif",
-      "*.webp",
-      "*.ico",
-      "*.pdf",
-      "*.zip"
+      "*.colorset"
+    ],
+    "high_signal_files": [
+      "README*",
+      "Cargo.toml",
+      "package.json",
+      "manifest.json",
+      "pyproject.toml",
+      "requirements.txt",
+      "go.mod",
+      "Gemfile",
+      "Dockerfile",
+      "docker-compose.yml",
+      "compose.yml",
+      "compose.yaml",
+      "tsconfig.json"
     ],
     "max_file_bytes": 65536,
     "max_excerpt_bytes": 4096,
@@ -165,6 +183,11 @@ The initial config looks like this:
 }
 ```
 
+`exclude` is for directory names and legacy general patterns. `high_signal_files` is the
+file-content embedding allowlist. It matches exact basenames such as `package.json` and
+wildcard patterns such as `README*` or `*.md`; files outside this list are not content
+embedded.
+
 `generic_terms` controls low-signal query words that should not dominate path filtering or
 ranking. You can add or remove words from that list without reindexing.
 
@@ -204,10 +227,12 @@ created, searches fall back to the normal direct path.
 The current indexer stores directory metadata and high-signal text-file content separately
 in SQLite. Directory rows store structured filesystem metadata: name, type, parent path,
 size in bytes, created time, modified time, accessed time, readonly status, and index time.
-High-signal files such as READMEs, package manifests, project config files, and SQL schemas
-are stored as file metadata plus embedded content chunks linked back to their containing
-directories. Low-signal arbitrary text files are skipped by default to keep initial indexing
-fast, and media/asset/archive files such as SVGs, images, PDFs, and ZIPs are ignored.
+Files matching `high_signal_files`, such as READMEs and project descriptor files
+(`package.json`, `Cargo.toml`, `pyproject.toml`, `manifest.json`, `go.mod`, dependency
+manifests, and container manifests), are stored as file metadata plus embedded content
+chunks linked back to their containing directories. Files outside that allowlist are not
+content embedded by default, which keeps source code, arbitrary notes, and generated output
+out of the vector index unless explicitly added.
 Directory metadata itself is not embedded.
 Hidden directories are always skipped and pruned from the local index. Each configured index
 root is treated as a container, and each top-level directory inside it is indexed only through
@@ -218,6 +243,11 @@ Model files are cached under `~/.cache/cds/models` by default, or under `CDS_CAC
 when that environment variable is set. Tests can force deterministic fake embeddings with
 `CDS_EMBEDDER=fake`.
 
+SQLite remains the durable source of indexed data. Embeddings are kept as packed `f32` BLOBs
+for exact reranking and compatibility, and mirrored into per-dimension sqlite-vec `vec0`
+tables for nearest-neighbor candidate selection. Existing databases are backfilled into
+the sqlite-vec tables on open after migrations run.
+
 ## Directory Types
 
 Directory type inference is rule-based and data-driven. `cds` does not ask the embedding
@@ -227,13 +257,28 @@ Instead, it runs JSON detectors against each indexed directory during `cds --ini
 
 Built-in detectors live in `src/index/directory_types/` and currently cover:
 
+- `.net project`
+- `android app`
+- `astro site`
 - `chrome extension`
 - `database migrations`
+- `django app`
+- `dockerized app`
+- `go project`
+- `ios app`
+- `java project`
+- `kubernetes config`
+- `laravel app`
+- `monorepo`
 - `next.js app`
 - `node project`
 - `python project`
 - `rails app`
+- `react app`
 - `rust project`
+- `sveltekit app`
+- `terraform project`
+- `vite app`
 
 Each detector has a `label` and one or more `rules`. A rule matches only when all of its
 `signals` match. If a detector has multiple matching rules for the same directory, `cds`
@@ -276,11 +321,14 @@ Supported signal kinds:
   `contains_any`.
 - `child_name`: checks immediate child names with `contains_any`, `starts_with_any`,
   and/or `ends_with_any`.
+- `child_file_contains`: reads matching immediate child text files and checks their text.
+  Use `name_contains_any`, `name_starts_with_any`, and/or `name_ends_with_any` to select
+  child files, plus `contains_any` and/or `contains_all` for content.
 
 Signals are case-insensitive. Paths are relative to the directory being classified.
-`file_contains` ignores binary files and files larger than 128 KiB.
+Content-reading signals ignore binary files and files larger than 128 KiB.
 
-For example, a custom detector for Terraform projects can be added directly to
+For example, a custom detector for documentation projects can be added directly to
 `~/.config/cds/config.json`:
 
 ```json
@@ -289,6 +337,13 @@ For example, a custom detector for Terraform projects can be added directly to
     "roots": ["~/Projects"],
     "exclude": [
       ".git",
+      "Applications",
+      "Library",
+      "Network",
+      "System",
+      "Volumes",
+      "cores",
+      "private",
       "node_modules",
       "target",
       "dist",
@@ -303,6 +358,21 @@ For example, a custom detector for Terraform projects can be added directly to
       "*.appiconset",
       "*.colorset"
     ],
+    "high_signal_files": [
+      "README*",
+      "Cargo.toml",
+      "package.json",
+      "manifest.json",
+      "pyproject.toml",
+      "requirements.txt",
+      "go.mod",
+      "Gemfile",
+      "Dockerfile",
+      "docker-compose.yml",
+      "compose.yml",
+      "compose.yaml",
+      "tsconfig.json"
+    ],
     "max_file_bytes": 65536,
     "max_excerpt_bytes": 4096,
     "max_entries_per_directory": 80,
@@ -311,16 +381,16 @@ For example, a custom detector for Terraform projects can be added directly to
   },
   "detectors": [
     {
-      "label": "terraform project",
+      "label": "documentation project",
       "rules": [
         {
-          "id": "terraform_files",
-          "confidence": 0.95,
-          "evidence_summary": "directory contains Terraform files",
+          "id": "mkdocs_config",
+          "confidence": 0.9,
+          "evidence_summary": "mkdocs.yml exists",
           "signals": [
             {
-              "kind": "child_name",
-              "ends_with_any": [".tf", ".tfvars"]
+              "kind": "file_exists",
+              "path": "mkdocs.yml"
             }
           ]
         }

@@ -1,0 +1,16 @@
+{
+  "label": "terraform project",
+  "rules": [
+    {
+      "id": "terraform_root_files",
+      "confidence": 0.95,
+      "evidence_summary": "directory contains Terraform files",
+      "signals": [
+        {
+          "kind": "child_name",
+          "ends_with_any": [".tf", ".tfvars"]
+        }
+      ]
+    }
+  ]
+}

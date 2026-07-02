@@ -146,7 +146,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::db::{Database, DocumentKind, IndexedDocument};
+    use crate::db::{Database, DocumentKind, IndexedDocument, IndexedFile, IndexedFileChunk};
     use crate::embed::{Embedder, FakeEmbedder};
 
     #[tokio::test]
@@ -261,7 +261,7 @@ mod tests {
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("README.md"), "alpha").unwrap();
         fs::write(app.join("Cargo.toml"), "bravo").unwrap();
-        fs::write(app.join("schema.sql"), "charlie").unwrap();
+        fs::write(app.join("package.json"), r#"{"name":"charlie"}"#).unwrap();
 
         let settings = Settings::default();
         let database = Database::open_in_memory().await.unwrap();
@@ -316,6 +316,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_scan_prunes_previously_indexed_non_descriptor_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Projects");
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let schema_path = app.join("schema.sql");
+        fs::write(&schema_path, "CREATE TABLE users (id INTEGER PRIMARY KEY);").unwrap();
+
+        let settings = Settings::default();
+        let database = Database::open_in_memory().await.unwrap();
+        let stale_file = IndexedFile {
+            path: schema_path.to_string_lossy().into_owned(),
+            directory_path: app.to_string_lossy().into_owned(),
+            name: "schema.sql".to_string(),
+            extension: Some("sql".to_string()),
+            size_bytes: 44,
+            created_unix_seconds: None,
+            modified_unix_seconds: 1,
+            accessed_unix_seconds: None,
+            readonly: false,
+            content_fingerprint: "stale-schema".to_string(),
+            indexed_unix_seconds: 1,
+        };
+        let stale_chunk = IndexedFileChunk {
+            file_path: stale_file.path.clone(),
+            directory_path: stale_file.directory_path.clone(),
+            chunk_index: 0,
+            content: "CREATE TABLE users (id INTEGER PRIMARY KEY);".to_string(),
+            embedding: vec![1.0; 16],
+            start_byte: 0,
+            end_byte: 44,
+            indexed_unix_seconds: 1,
+        };
+        database
+            .upsert_files_with_chunks(&[(&stale_file, &[stale_chunk])])
+            .await
+            .unwrap();
+        let embedder = FakeEmbedder::new(16);
+        let indexer = Indexer::new(&settings, &database, &embedder);
+
+        let report = indexer.index_roots(vec![root]).await.unwrap();
+
+        assert_eq!(report.text_files_indexed, 0);
+        assert_eq!(report.file_chunks_indexed, 0);
+        assert!(
+            database
+                .file_chunk_matches()
+                .await
+                .unwrap()
+                .into_iter()
+                .all(|chunk| chunk.file_path != schema_path.to_string_lossy())
+        );
+    }
+
+    #[tokio::test]
     async fn skips_hidden_roots_and_prunes_stale_rows() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".hidden-project");
@@ -356,6 +411,59 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_builtin_home_noise_directories_and_prunes_stale_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home");
+        let applications = root.join("Applications");
+        let stale_child = applications.join("Chrome Apps.localized");
+        let projects = root.join("Projects");
+        fs::create_dir_all(&stale_child).unwrap();
+        fs::create_dir_all(&projects).unwrap();
+
+        let settings = Settings::default();
+        let database = Database::open_in_memory().await.unwrap();
+        database
+            .upsert_document(&IndexedDocument {
+                path: stale_child.to_string_lossy().into_owned(),
+                name: "Chrome Apps.localized".to_string(),
+                kind: DocumentKind::Directory,
+                parent_path: Some(applications.to_string_lossy().into_owned()),
+                searchable_text: "stale application directory".to_string(),
+                embedding: vec![1.0; 16],
+                metadata_fingerprint: "stale".to_string(),
+                size_bytes: 0,
+                created_unix_seconds: None,
+                modified_unix_seconds: 0,
+                accessed_unix_seconds: None,
+                readonly: false,
+                indexed_unix_seconds: 0,
+            })
+            .await
+            .unwrap();
+        let embedder = FakeEmbedder::new(16);
+        let indexer = Indexer::new(&settings, &database, &embedder);
+
+        let report = indexer.index_roots(vec![root.clone()]).await.unwrap();
+
+        assert_eq!(report.roots_scanned, 1);
+        assert_eq!(report.entries_skipped, 1);
+        assert_eq!(
+            database
+                .get_document(&stale_child.to_string_lossy())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            database
+                .get_document(&projects.to_string_lossy())
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 

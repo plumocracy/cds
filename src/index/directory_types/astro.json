@@ -1,0 +1,28 @@
+{
+  "label": "astro site",
+  "rules": [
+    {
+      "id": "astro_config",
+      "confidence": 0.96,
+      "evidence_summary": "astro.config file exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "starts_with_any": ["astro.config"]
+        }
+      ]
+    },
+    {
+      "id": "astro_dependency",
+      "confidence": 0.92,
+      "evidence_summary": "package.json references Astro",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_any": ["\"astro\""]
+        }
+      ]
+    }
+  ]
+}

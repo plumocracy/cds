@@ -4,11 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::config::{AppPaths, Settings, expand_tilde};
 use crate::db::{Database, DirectoryTypeCount};
@@ -24,6 +27,7 @@ pub use error::AppError;
 
 const DAEMON_SEARCH_TIMEOUT: Duration = Duration::from_millis(900);
 const DAEMON_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_CHILD_ENV: &str = "CDS_DAEMON_CHILD";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
@@ -242,7 +246,7 @@ impl Default for DaemonOptions {
 
 async fn daemon_with_options(options: DaemonOptions) -> Result<()> {
     let paths = AppPaths::discover()?;
-    if !options.run_once {
+    if !options.run_once && env::var_os(DAEMON_CHILD_ENV).is_none() {
         stop_cds_daemons(&paths)?;
     }
     let search_listener = if options.run_once {
@@ -374,11 +378,23 @@ fn start_daemon_process(paths: &AppPaths) -> Result<StartedDaemon> {
     })?;
     let executable = env::current_exe()
         .map_err(|source| app_err(AppError::ResolveCurrentExecutable { source }))?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--daemon")
+        .env(DAEMON_CHILD_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr))
+        .stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
         .spawn()
         .map_err(|source| app_err(AppError::StartDaemon { source }))?;
     let pid = child.id();
@@ -568,6 +584,8 @@ struct DaemonSearchRequest {
 struct DaemonSearchResponse {
     results: Vec<SearchResult>,
     dry_run: Option<SearchDryRun>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[cfg(unix)]
@@ -643,7 +661,7 @@ fn prepare_daemon_socket(_paths: &AppPaths) -> Result<DaemonSearchListener> {
 
 #[cfg(unix)]
 fn daemon_search(paths: &AppPaths, query: &str, limit: usize) -> Result<Option<Vec<SearchResult>>> {
-    let response = daemon_request(
+    let Some(response) = daemon_request(
         paths,
         DaemonSearchRequest {
             query: query.to_string(),
@@ -651,8 +669,14 @@ fn daemon_search(paths: &AppPaths, query: &str, limit: usize) -> Result<Option<V
             dry_run: false,
         },
         DAEMON_SEARCH_TIMEOUT,
-    )?;
-    Ok(response.map(|response| response.results))
+    )?
+    else {
+        return Ok(None);
+    };
+    if response.error.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(response.results))
 }
 
 #[cfg(unix)]
@@ -669,6 +693,9 @@ fn daemon_dry_run(paths: &AppPaths, query: &str, limit: usize) -> Result<Option<
     else {
         return Ok(None);
     };
+    if response.error.is_some() {
+        return Ok(None);
+    }
     response
         .dry_run
         .map(Some)
@@ -770,28 +797,18 @@ where
             Ok(request) => request,
             Err(_) => continue,
         };
-        let settings = Settings::load_or_create(&paths.config_file)?;
-        let generic_terms = search_generic_terms(&settings);
-        let (cache, cache_status) =
-            search_cache_for(database, search_cache, &generic_terms).await?;
-        let searcher = Searcher::new_with_settings(database, embedder, &settings);
-        let response = if request.dry_run {
-            let report = searcher
-                .dry_run_with_cache_status(&request.query, request.limit, cache, cache_status)
-                .await?;
-            DaemonSearchResponse {
-                results: report.results.clone(),
-                dry_run: Some(report),
-            }
-        } else {
-            let results = searcher
-                .search_with_cache(&request.query, request.limit, cache)
-                .await?;
-            DaemonSearchResponse {
-                results,
-                dry_run: None,
-            }
-        };
+        let response =
+            match daemon_search_response(paths, database, embedder, search_cache, request).await {
+                Ok(response) => response,
+                Err(source) => {
+                    eprintln!("cds: daemon search request failed: {source:?}");
+                    DaemonSearchResponse {
+                        results: Vec::new(),
+                        dry_run: None,
+                        error: Some(source.to_string()),
+                    }
+                }
+            };
         let response = serde_json::to_vec(&response)
             .map_err(|source| app_err(AppError::SerializeDaemonMessage { source }))?;
         if let Err(source) = stream.write_all(&response) {
@@ -803,17 +820,53 @@ where
     }
 }
 
+async fn daemon_search_response<E>(
+    paths: &AppPaths,
+    database: &Database,
+    embedder: &E,
+    search_cache: &mut Option<SearchCache>,
+    request: DaemonSearchRequest,
+) -> Result<DaemonSearchResponse>
+where
+    E: Embedder,
+{
+    let settings = Settings::load_or_create(&paths.config_file)?;
+    let generic_terms = search_generic_terms(&settings);
+    let (cache, cache_status) =
+        search_cache_for(database, search_cache, &settings, &generic_terms).await?;
+    let searcher = Searcher::new_with_settings(database, embedder, &settings);
+    if request.dry_run {
+        let report = searcher
+            .dry_run_with_cache_status(&request.query, request.limit, cache, cache_status)
+            .await?;
+        Ok(DaemonSearchResponse {
+            results: report.results.clone(),
+            dry_run: Some(report),
+            error: None,
+        })
+    } else {
+        let results = searcher
+            .search_with_cache(&request.query, request.limit, cache)
+            .await?;
+        Ok(DaemonSearchResponse {
+            results,
+            dry_run: None,
+            error: None,
+        })
+    }
+}
+
 async fn search_cache_for<'a>(
     database: &Database,
     search_cache: &'a mut Option<SearchCache>,
+    settings: &Settings,
     generic_terms: &HashSet<String>,
 ) -> Result<(&'a SearchCache, CacheDryRunStatus)> {
     let revision = database.current_revision().await?;
-    let status = if search_cache
-        .as_ref()
-        .is_none_or(|cache| !cache.matches_revision_and_generic_terms(revision, generic_terms))
-    {
-        *search_cache = Some(SearchCache::load(database, generic_terms).await?);
+    let status = if search_cache.as_ref().is_none_or(|cache| {
+        !cache.matches_revision_and_settings(revision, generic_terms, &settings.index)
+    }) {
+        *search_cache = Some(SearchCache::load(database, generic_terms, &settings.index).await?);
         CacheDryRunStatus::Miss
     } else {
         CacheDryRunStatus::Hit
@@ -949,9 +1002,9 @@ fn collect_file_snapshots(
     snapshot: &mut RootFileSnapshot,
     depth: DaemonSnapshotDepth,
 ) -> Result<()> {
-    let metadata = match fs::metadata(path) {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+        Err(source) if should_skip_daemon_watch_io_error(&source) => {
             return Ok(());
         }
         Err(source) => {
@@ -961,6 +1014,10 @@ fn collect_file_snapshots(
             }));
         }
     };
+
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
 
     if !metadata.is_dir() {
         snapshot.files.insert(
@@ -978,26 +1035,40 @@ fn collect_file_snapshots(
         return Ok(());
     }
 
-    let mut entries = fs::read_dir(path)
-        .map_err(|source| {
-            app_err(AppError::InspectDaemonWatchPath {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(source) if should_skip_daemon_watch_io_error(&source) => {
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(app_err(AppError::InspectDaemonWatchPath {
                 path: path.to_path_buf(),
                 source,
-            })
-        })?
-        .filter_map(|entry| entry.ok())
-        .collect::<Vec<_>>();
+            }));
+        }
+    };
+    let mut entries = entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| {
-            app_err(AppError::InspectDaemonWatchPath {
-                path: path.clone(),
-                source,
-            })
-        })?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(source) if should_skip_daemon_watch_io_error(&source) => {
+                continue;
+            }
+            Err(source) => {
+                return Err(app_err(AppError::InspectDaemonWatchPath {
+                    path: path.clone(),
+                    source,
+                }));
+            }
+        };
+
+        if file_type.is_symlink() {
+            continue;
+        }
 
         if file_type.is_dir() {
             if settings.index.is_excluded_directory_name(&name) {
@@ -1018,6 +1089,13 @@ fn collect_file_snapshots(
     }
 
     Ok(())
+}
+
+fn should_skip_daemon_watch_io_error(source: &io::Error) -> bool {
+    matches!(
+        source.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    )
 }
 
 pub async fn resolve_cd_script(args: Vec<OsString>) -> Vec<u8> {
@@ -1278,19 +1356,22 @@ mod tests {
         use crate::db::{DocumentKind, IndexedDocument};
 
         let database = Database::open_in_memory().await.unwrap();
+        let settings = Settings::default();
         let generic_terms = HashSet::new();
         let mut search_cache = None;
 
         let first_status = {
-            let (_, status) = search_cache_for(&database, &mut search_cache, &generic_terms)
-                .await
-                .unwrap();
+            let (_, status) =
+                search_cache_for(&database, &mut search_cache, &settings, &generic_terms)
+                    .await
+                    .unwrap();
             status
         };
         let second_status = {
-            let (_, status) = search_cache_for(&database, &mut search_cache, &generic_terms)
-                .await
-                .unwrap();
+            let (_, status) =
+                search_cache_for(&database, &mut search_cache, &settings, &generic_terms)
+                    .await
+                    .unwrap();
             status
         };
         assert_eq!(first_status, CacheDryRunStatus::Miss);
@@ -1316,9 +1397,10 @@ mod tests {
             .unwrap();
 
         let stale_status = {
-            let (_, status) = search_cache_for(&database, &mut search_cache, &generic_terms)
-                .await
-                .unwrap();
+            let (_, status) =
+                search_cache_for(&database, &mut search_cache, &settings, &generic_terms)
+                    .await
+                    .unwrap();
             status
         };
         assert_eq!(stale_status, CacheDryRunStatus::Miss);
@@ -1479,5 +1561,29 @@ mod tests {
 
         assert!(snapshot.files.contains_key(&included));
         assert!(!snapshot.files.contains_key(&excluded));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_file_snapshot_skips_symlink_loops() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let real_file = root.join("README.md");
+        let loop_link = root.join("loop");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&real_file, "included content").unwrap();
+        std::os::unix::fs::symlink(&root, &loop_link).unwrap();
+
+        let settings = Settings::default();
+
+        let snapshot = daemon_root_file_snapshot(&root, &settings).unwrap();
+
+        assert!(snapshot.files.contains_key(&real_file));
+        assert!(
+            !snapshot
+                .files
+                .keys()
+                .any(|path| path.starts_with(&loop_link))
+        );
     }
 }

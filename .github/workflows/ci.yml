@@ -40,11 +40,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install shell test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -60,36 +55,5 @@ jobs:
       - name: Run Rust tests
         run: |
           cargo test --lib --bins
-          cargo test --test shell_integration
+          cargo test --tests
           cargo test --doc
-
-  cd-equivalence:
-    name: Docker cd Equivalence
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Cache Docker Cargo data
-        uses: actions/cache@v5
-        with:
-          path: target/docker-cache
-          key: docker-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            docker-cargo-${{ runner.os }}-
-
-      - name: Show Docker version
-        run: docker version
-
-      - name: Run Docker cd equivalence test
-        env:
-          CDS_DOCKER_IMAGE: rust:1
-          CDS_DOCKER_RANDOM_CASES: 20
-        run: cargo test --test docker_cd_equivalence -- --nocapture

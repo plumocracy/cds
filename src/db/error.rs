@@ -41,6 +41,12 @@ pub enum DbError {
         source: sqlx::Error,
     },
 
+    #[error("failed to register sqlite-vec extension with SQLite, status code {code}")]
+    RegisterSqliteVec { code: i32 },
+
+    #[error("invalid embedding dimension {dimension}")]
+    InvalidEmbeddingDimension { dimension: usize },
+
     #[error("embedding dimension overflows i64")]
     EmbeddingDimensionOverflow {
         #[source]
@@ -177,6 +183,12 @@ pub enum DbError {
 
     #[error("failed to read file chunk embeddings")]
     ReadFileChunks {
+        #[source]
+        source: sqlx::Error,
+    },
+
+    #[error("failed to synchronize sqlite-vec file chunk vectors")]
+    SyncFileChunkVectors {
         #[source]
         source: sqlx::Error,
     },

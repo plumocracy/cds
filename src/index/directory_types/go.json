@@ -1,0 +1,11 @@
+{
+  "label": "go project",
+  "rules": [
+    {
+      "id": "go_mod",
+      "confidence": 0.98,
+      "evidence_summary": "go.mod exists",
+      "signals": [{ "kind": "file_exists", "path": "go.mod" }]
+    }
+  ]
+}

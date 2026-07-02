@@ -130,7 +130,7 @@ fn searchable_text(
             }
 
             child_files.push(name.clone());
-            if is_high_signal_file(&name)
+            if settings.index.is_high_signal_file_name(&name)
                 && let Some(excerpt) = read_text_excerpt(
                     &path,
                     settings.index.max_file_bytes,
@@ -156,16 +156,6 @@ fn searchable_text(
 
     lines.extend(excerpts);
     Ok(lines.join("\n"))
-}
-
-fn is_high_signal_file(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == "cargo.toml"
-        || lower == "package.json"
-        || lower == "pyproject.toml"
-        || lower == "go.mod"
-        || lower == "gemfile"
-        || lower.starts_with("readme")
 }
 
 fn read_text_excerpt(

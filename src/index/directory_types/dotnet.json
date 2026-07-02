@@ -1,0 +1,22 @@
+{
+  "label": ".net project",
+  "rules": [
+    {
+      "id": "dotnet_project_file",
+      "confidence": 0.96,
+      "evidence_summary": ".NET project or solution file exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "ends_with_any": [".csproj", ".fsproj", ".vbproj", ".sln"]
+        }
+      ]
+    },
+    {
+      "id": "global_json",
+      "confidence": 0.72,
+      "evidence_summary": "global.json exists",
+      "signals": [{ "kind": "file_exists", "path": "global.json" }]
+    }
+  ]
+}

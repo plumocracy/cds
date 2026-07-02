@@ -1,0 +1,43 @@
+{
+  "label": "android app",
+  "rules": [
+    {
+      "id": "android_gradle",
+      "confidence": 0.95,
+      "evidence_summary": "Gradle build references Android plugin",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "build.gradle",
+          "contains_any": [
+            "com.android.application",
+            "com.android.library",
+            "android {"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "android_gradle_kts",
+      "confidence": 0.95,
+      "evidence_summary": "Gradle Kotlin build references Android plugin",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "build.gradle.kts",
+          "contains_any": [
+            "com.android.application",
+            "com.android.library",
+            "android {"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "android_manifest",
+      "confidence": 0.8,
+      "evidence_summary": "AndroidManifest.xml exists",
+      "signals": [{ "kind": "file_exists", "path": "AndroidManifest.xml" }]
+    }
+  ]
+}

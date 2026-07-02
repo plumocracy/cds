@@ -1,0 +1,22 @@
+{
+  "label": "ios app",
+  "rules": [
+    {
+      "id": "xcode_project",
+      "confidence": 0.95,
+      "evidence_summary": "Xcode project or workspace exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "ends_with_any": [".xcodeproj", ".xcworkspace"]
+        }
+      ]
+    },
+    {
+      "id": "swift_package",
+      "confidence": 0.75,
+      "evidence_summary": "Package.swift exists",
+      "signals": [{ "kind": "file_exists", "path": "Package.swift" }]
+    }
+  ]
+}

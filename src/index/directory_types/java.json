@@ -1,0 +1,22 @@
+{
+  "label": "java project",
+  "rules": [
+    {
+      "id": "maven_pom",
+      "confidence": 0.94,
+      "evidence_summary": "pom.xml exists",
+      "signals": [{ "kind": "file_exists", "path": "pom.xml" }]
+    },
+    {
+      "id": "gradle_build",
+      "confidence": 0.88,
+      "evidence_summary": "Gradle build file exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "starts_with_any": ["build.gradle"]
+        }
+      ]
+    }
+  ]
+}

@@ -3,7 +3,7 @@ mod error;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use crate::config::{Settings, default_generic_terms};
+use crate::config::{IndexSettings, Settings};
 use crate::db::{
     Database, DirectoryClassification, FileChunkMatch, IndexedDocument, ModifiedTimeRange,
 };
@@ -78,19 +78,25 @@ pub struct EmbeddingScore {
 pub struct Searcher<'a, E> {
     database: &'a Database,
     embedder: &'a E,
+    index_settings: IndexSettings,
     generic_terms: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchCache {
     generic_terms: HashSet<String>,
+    index_settings: IndexSettings,
     revision: i64,
     directories: Vec<IndexedDocument>,
     path_term_stats: PathTermStats,
 }
 
 impl SearchCache {
-    pub async fn load(database: &Database, generic_terms: &HashSet<String>) -> Result<Self> {
+    pub async fn load(
+        database: &Database,
+        generic_terms: &HashSet<String>,
+        index_settings: &IndexSettings,
+    ) -> Result<Self> {
         loop {
             let revision = database
                 .current_revision()
@@ -100,6 +106,7 @@ impl SearchCache {
                 .directory_search_documents()
                 .await
                 .map_err(|source| SearchError::LoadDirectories { source })?;
+            let directories = filter_indexable_directories(directories, index_settings);
             let current_revision = database
                 .current_revision()
                 .await
@@ -112,6 +119,7 @@ impl SearchCache {
 
             return Ok(Self {
                 generic_terms: generic_terms.clone(),
+                index_settings: index_settings.clone(),
                 revision,
                 directories,
                 path_term_stats,
@@ -119,12 +127,15 @@ impl SearchCache {
         }
     }
 
-    pub fn matches_revision_and_generic_terms(
+    pub fn matches_revision_and_settings(
         &self,
         revision: i64,
         generic_terms: &HashSet<String>,
+        index_settings: &IndexSettings,
     ) -> bool {
-        self.revision == revision && &self.generic_terms == generic_terms
+        self.revision == revision
+            && &self.generic_terms == generic_terms
+            && &self.index_settings == index_settings
     }
 }
 
@@ -133,11 +144,18 @@ where
     E: Embedder,
 {
     pub fn new(database: &'a Database, embedder: &'a E) -> Self {
-        Self::new_with_generic_terms(database, embedder, default_generic_terms())
+        let index_settings = IndexSettings::default();
+        let generic_terms = index_settings.generic_terms.clone();
+        Self::new_with_index_settings(database, embedder, index_settings, generic_terms)
     }
 
     pub fn new_with_settings(database: &'a Database, embedder: &'a E, settings: &Settings) -> Self {
-        Self::new_with_generic_terms(database, embedder, settings.index.generic_terms.clone())
+        Self::new_with_index_settings(
+            database,
+            embedder,
+            settings.index.clone(),
+            settings.index.generic_terms.clone(),
+        )
     }
 
     pub fn new_with_generic_terms(
@@ -145,9 +163,24 @@ where
         embedder: &'a E,
         generic_terms: impl IntoIterator<Item = String>,
     ) -> Self {
+        let generic_terms = generic_terms.into_iter().collect::<Vec<_>>();
+        let index_settings = IndexSettings {
+            generic_terms: generic_terms.clone(),
+            ..IndexSettings::default()
+        };
+        Self::new_with_index_settings(database, embedder, index_settings, generic_terms)
+    }
+
+    fn new_with_index_settings(
+        database: &'a Database,
+        embedder: &'a E,
+        index_settings: IndexSettings,
+        generic_terms: impl IntoIterator<Item = String>,
+    ) -> Self {
         Self {
             database,
             embedder,
+            index_settings,
             generic_terms: generic_terms
                 .into_iter()
                 .map(|term| term.to_ascii_lowercase())
@@ -192,7 +225,8 @@ where
         let cache = if let Some(cache) = cache {
             cache
         } else {
-            loaded_cache = SearchCache::load(self.database, &self.generic_terms).await?;
+            loaded_cache =
+                SearchCache::load(self.database, &self.generic_terms, &self.index_settings).await?;
             &loaded_cache
         };
         let all_directories = &cache.directories;
@@ -205,6 +239,11 @@ where
                 .directory_search_candidates_by_terms(&candidate_terms)
                 .await
                 .map_err(|source| SearchError::LoadDirectories { source })?
+                .into_iter()
+                .filter(|directory| {
+                    is_indexable_directory_path(&directory.path, &self.index_settings)
+                })
+                .collect()
         };
         add_fuzzy_directory_candidates(
             &mut candidate_directories,
@@ -237,13 +276,24 @@ where
             }]);
         }
 
+        let query_embedding = self
+            .embedder
+            .embed_query(search_query)
+            .map_err(|source| SearchError::EmbedQuery { source })?;
         let (chunks, directories) = if candidate_directories.is_empty() {
             let chunks = self
                 .database
-                .file_chunk_matches_with_modified_range(temporal_filter.modified_range())
+                .nearest_file_chunk_matches_with_modified_range(
+                    &query_embedding,
+                    temporal_filter.modified_range(),
+                    semantic_candidate_limit(limit),
+                )
                 .await
                 .map_err(|source| SearchError::LoadDirectories { source })?;
-            (chunks, all_directories.clone())
+            (
+                filter_indexable_chunks(chunks, &self.index_settings),
+                all_directories.clone(),
+            )
         } else {
             let directory_paths = candidate_directories
                 .iter()
@@ -257,12 +307,11 @@ where
                 )
                 .await
                 .map_err(|source| SearchError::LoadDirectories { source })?;
-            (chunks, candidate_directories)
+            (
+                filter_indexable_chunks(chunks, &self.index_settings),
+                candidate_directories,
+            )
         };
-        let query_embedding = self
-            .embedder
-            .embed_query(search_query)
-            .map_err(|source| SearchError::EmbedQuery { source })?;
         let temporal_directory_paths = temporal_filter
             .has_range()
             .then(|| temporal_matching_directory_paths(&chunks));
@@ -460,7 +509,8 @@ where
         let (cache, cache_status) = if let Some((cache, cache_status)) = cache {
             (cache, cache_status)
         } else {
-            loaded_cache = SearchCache::load(self.database, &self.generic_terms).await?;
+            loaded_cache =
+                SearchCache::load(self.database, &self.generic_terms, &self.index_settings).await?;
             (&loaded_cache, CacheDryRunStatus::Miss)
         };
         let all_directories = &cache.directories;
@@ -472,6 +522,11 @@ where
                 .directory_search_candidates_by_terms(&candidate_terms)
                 .await
                 .map_err(|source| SearchError::LoadDirectories { source })?
+                .into_iter()
+                .filter(|directory| {
+                    is_indexable_directory_path(&directory.path, &self.index_settings)
+                })
+                .collect()
         };
         let sql_candidate_paths = sql_candidate_documents
             .iter()
@@ -494,11 +549,20 @@ where
             .map(|directory| directory.path.clone())
             .collect::<Vec<_>>();
 
+        let query_embedding = self
+            .embedder
+            .embed_query(search_query)
+            .map_err(|source| SearchError::EmbedQuery { source })?;
         let chunks = if candidate_directories.is_empty() {
             self.database
-                .file_chunk_matches_with_modified_range(temporal_query.filter.modified_range())
+                .nearest_file_chunk_matches_with_modified_range(
+                    &query_embedding,
+                    temporal_query.filter.modified_range(),
+                    semantic_candidate_limit(limit),
+                )
                 .await
-                .map_err(|source| SearchError::LoadDirectories { source })?
+                .map_err(|source| SearchError::LoadDirectories { source })
+                .map(|chunks| filter_indexable_chunks(chunks, &self.index_settings))?
         } else {
             let directory_paths = candidate_directories
                 .iter()
@@ -510,12 +574,9 @@ where
                     temporal_query.filter.modified_range(),
                 )
                 .await
-                .map_err(|source| SearchError::LoadDirectories { source })?
+                .map_err(|source| SearchError::LoadDirectories { source })
+                .map(|chunks| filter_indexable_chunks(chunks, &self.index_settings))?
         };
-        let query_embedding = self
-            .embedder
-            .embed_query(search_query)
-            .map_err(|source| SearchError::EmbedQuery { source })?;
         let mut embedding_scores = chunks
             .into_iter()
             .map(|chunk| EmbeddingScore {
@@ -554,6 +615,40 @@ where
             results,
         })
     }
+}
+
+fn filter_indexable_directories(
+    directories: Vec<IndexedDocument>,
+    index_settings: &IndexSettings,
+) -> Vec<IndexedDocument> {
+    directories
+        .into_iter()
+        .filter(|directory| is_indexable_directory_path(&directory.path, index_settings))
+        .collect()
+}
+
+fn filter_indexable_chunks(
+    chunks: Vec<FileChunkMatch>,
+    index_settings: &IndexSettings,
+) -> Vec<FileChunkMatch> {
+    chunks
+        .into_iter()
+        .filter(|chunk| is_indexable_directory_path(&chunk.directory_path, index_settings))
+        .collect()
+}
+
+fn semantic_candidate_limit(result_limit: usize) -> usize {
+    if result_limit == 0 {
+        return 1_000;
+    }
+
+    result_limit.saturating_mul(200).clamp(1_000, 10_000)
+}
+
+fn is_indexable_directory_path(path: &str, index_settings: &IndexSettings) -> bool {
+    path.split('/')
+        .filter(|component| !component.is_empty())
+        .all(|component| !index_settings.is_excluded_directory_component(component))
 }
 
 fn high_confidence_directory_candidate<'a>(
@@ -1557,6 +1652,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.first().unwrap().path, chrome.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn search_ignores_stale_builtin_noise_directories() {
+        let database = Database::open_in_memory().await.unwrap();
+        let embedder = FakeEmbedder::default();
+        insert_directory_with_chunk(
+            &database,
+            &embedder,
+            "/tmp/Applications/Chrome Apps.localized",
+            10,
+            "Chrome extension application launcher",
+        )
+        .await;
+        insert_directory_with_chunk(
+            &database,
+            &embedder,
+            "/tmp/Projects/chrome-extension",
+            10,
+            "Chrome extension manifest browser popup",
+        )
+        .await;
+
+        let results = Searcher::new(&database, &embedder)
+            .search("chrome extension", 3)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "/tmp/Projects/chrome-extension");
     }
 
     #[test]

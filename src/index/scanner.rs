@@ -176,7 +176,7 @@ where
             .unwrap_or_default();
         if settings.index.is_excluded_name(&name) {
             database
-                .delete_current_file(&path.to_string_lossy())
+                .delete_path_tree(&path.to_string_lossy())
                 .await
                 .map_err(|source| IndexError::PruneExcludedPath {
                     path: path.to_string_lossy().into_owned(),
@@ -202,7 +202,7 @@ where
             }
             None => {
                 database
-                    .delete_current_file(&path.to_string_lossy())
+                    .delete_path_tree(&path.to_string_lossy())
                     .await
                     .map_err(|source| IndexError::PruneExcludedPath {
                         path: path.to_string_lossy().into_owned(),
@@ -566,6 +566,9 @@ fn scan_directory_job(job: &ScanJob, settings: &Settings) -> Result<ScanOutput> 
             });
         } else if file_type.is_file() {
             if settings.index.is_excluded_name(&name) {
+                output
+                    .pruned_paths
+                    .push(path.to_string_lossy().into_owned());
                 output.report.entries_skipped += 1;
                 continue;
             }
@@ -576,6 +579,11 @@ fn scan_directory_job(job: &ScanJob, settings: &Settings) -> Result<ScanOutput> 
                 output.report.file_chunks_indexed +=
                     u64::try_from(indexed_file.chunks.len()).unwrap_or(u64::MAX);
                 output.files.push(indexed_file);
+            } else {
+                output
+                    .pruned_paths
+                    .push(path.to_string_lossy().into_owned());
+                output.report.entries_skipped += 1;
             }
         } else {
             output.report.entries_skipped += 1;

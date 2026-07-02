@@ -1,0 +1,28 @@
+{
+  "label": "sveltekit app",
+  "rules": [
+    {
+      "id": "svelte_config",
+      "confidence": 0.96,
+      "evidence_summary": "svelte.config file exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "starts_with_any": ["svelte.config"]
+        }
+      ]
+    },
+    {
+      "id": "sveltekit_dependency",
+      "confidence": 0.95,
+      "evidence_summary": "package.json references SvelteKit",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_any": ["\"@sveltejs/kit\""]
+        }
+      ]
+    }
+  ]
+}

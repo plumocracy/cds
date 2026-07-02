@@ -1,0 +1,41 @@
+{
+  "label": "kubernetes config",
+  "rules": [
+    {
+      "id": "helm_chart",
+      "confidence": 0.95,
+      "evidence_summary": "Chart.yaml exists",
+      "signals": [{ "kind": "file_exists", "path": "Chart.yaml" }]
+    },
+    {
+      "id": "kustomization_yaml",
+      "confidence": 0.93,
+      "evidence_summary": "kustomization.yaml exists",
+      "signals": [{ "kind": "file_exists", "path": "kustomization.yaml" }]
+    },
+    {
+      "id": "kustomization_yml",
+      "confidence": 0.93,
+      "evidence_summary": "kustomization.yml exists",
+      "signals": [{ "kind": "file_exists", "path": "kustomization.yml" }]
+    },
+    {
+      "id": "common_manifest_yaml",
+      "confidence": 0.86,
+      "evidence_summary": "YAML manifest contains apiVersion and kind",
+      "signals": [
+        {
+          "kind": "child_file_contains",
+          "name_ends_with_any": [".yaml", ".yml"],
+          "contains_all": ["apiVersion", "kind:"]
+        }
+      ]
+    },
+    {
+      "id": "helm_values",
+      "confidence": 0.75,
+      "evidence_summary": "values.yaml exists",
+      "signals": [{ "kind": "file_exists", "path": "values.yaml" }]
+    }
+  ]
+}

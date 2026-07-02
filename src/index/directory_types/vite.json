@@ -1,0 +1,28 @@
+{
+  "label": "vite app",
+  "rules": [
+    {
+      "id": "vite_config",
+      "confidence": 0.96,
+      "evidence_summary": "vite.config file exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "starts_with_any": ["vite.config"]
+        }
+      ]
+    },
+    {
+      "id": "vite_dependency",
+      "confidence": 0.92,
+      "evidence_summary": "package.json references Vite",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_any": ["\"vite\""]
+        }
+      ]
+    }
+  ]
+}

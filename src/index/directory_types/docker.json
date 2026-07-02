@@ -1,0 +1,40 @@
+{
+  "label": "dockerized app",
+  "rules": [
+    {
+      "id": "dockerfile",
+      "confidence": 0.94,
+      "evidence_summary": "Dockerfile exists",
+      "signals": [
+        {
+          "kind": "child_name",
+          "starts_with_any": ["Dockerfile"]
+        }
+      ]
+    },
+    {
+      "id": "docker_compose_yml",
+      "confidence": 0.92,
+      "evidence_summary": "docker-compose.yml exists",
+      "signals": [{ "kind": "file_exists", "path": "docker-compose.yml" }]
+    },
+    {
+      "id": "docker_compose_yaml",
+      "confidence": 0.92,
+      "evidence_summary": "docker-compose.yaml exists",
+      "signals": [{ "kind": "file_exists", "path": "docker-compose.yaml" }]
+    },
+    {
+      "id": "compose_yml",
+      "confidence": 0.9,
+      "evidence_summary": "compose.yml exists",
+      "signals": [{ "kind": "file_exists", "path": "compose.yml" }]
+    },
+    {
+      "id": "compose_yaml",
+      "confidence": 0.9,
+      "evidence_summary": "compose.yaml exists",
+      "signals": [{ "kind": "file_exists", "path": "compose.yaml" }]
+    }
+  ]
+}

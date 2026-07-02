@@ -1,0 +1,18 @@
+{
+  "label": "laravel app",
+  "rules": [
+    {
+      "id": "artisan_composer",
+      "confidence": 0.98,
+      "evidence_summary": "artisan exists and composer.json references Laravel",
+      "signals": [
+        { "kind": "file_exists", "path": "artisan" },
+        {
+          "kind": "file_contains",
+          "path": "composer.json",
+          "contains_any": ["laravel/framework"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "label": "monorepo",
+  "rules": [
+    {
+      "id": "pnpm_workspace",
+      "confidence": 0.97,
+      "evidence_summary": "pnpm-workspace.yaml exists",
+      "signals": [{ "kind": "file_exists", "path": "pnpm-workspace.yaml" }]
+    },
+    {
+      "id": "turbo_json",
+      "confidence": 0.95,
+      "evidence_summary": "turbo.json exists",
+      "signals": [{ "kind": "file_exists", "path": "turbo.json" }]
+    },
+    {
+      "id": "nx_json",
+      "confidence": 0.95,
+      "evidence_summary": "nx.json exists",
+      "signals": [{ "kind": "file_exists", "path": "nx.json" }]
+    },
+    {
+      "id": "package_json_workspaces",
+      "confidence": 0.9,
+      "evidence_summary": "package.json declares workspaces",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "package.json",
+          "contains_any": ["\"workspaces\""]
+        }
+      ]
+    }
+  ]
+}

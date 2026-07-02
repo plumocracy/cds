@@ -1,0 +1,20 @@
+{
+  "label": "django app",
+  "rules": [
+    {
+      "id": "manage_py",
+      "confidence": 0.96,
+      "evidence_summary": "manage.py references Django settings or management",
+      "signals": [
+        {
+          "kind": "file_contains",
+          "path": "manage.py",
+          "contains_any": [
+            "django.core.management",
+            "DJANGO_SETTINGS_MODULE"
+          ]
+        }
+      ]
+    }
+  ]
+}
